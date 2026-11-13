@@ -137,9 +137,9 @@ void updateResourceDistribution()
 		woodGatherRate = kbProtoUnitGetGatherRate(gEconUnit, cUnitTypeTree) * handicap;
 		// ----- Gold Gather Rate -----
 		if (civIsAsian() || civIsAfrican())
-			foodGatherRate = kbProtoUnitGetGatherRate(gEconUnit, gPlantationUnit, cResourceGold) * handicap;
+			goldGatherRate = kbProtoUnitGetGatherRate(gEconUnit, gPlantationUnit, cResourceGold) * handicap;
 		else
-			foodGatherRate = kbProtoUnitGetGatherRate(gEconUnit, gPlantationUnit) * handicap;
+			goldGatherRate = kbProtoUnitGetGatherRate(gEconUnit, gPlantationUnit) * handicap;
 	}
 
 	// Failsafe.
@@ -434,6 +434,559 @@ int findTradingLodge(int resourceID = -1)
 }
 
 //==============================================================================
+// isUsableHuntTarget
+//
+// Validate animal food targets without rejecting positive-food carcasses.
+//==============================================================================
+bool isUsableHuntTarget(int targetID = -1)
+{
+	if (targetID < 0)
+		return (false);
+	if ((kbUnitIsType(targetID, cUnitTypeHuntable) == false) &&
+		(kbUnitIsType(targetID, cUnitTypeHerdable) == false))
+	{
+		return (false);
+	}
+	if (kbUnitGetPosition(targetID) == cInvalidVector)
+		return (false);
+	if (kbUnitGetResourceAmount(targetID, cResourceFood) <= 0.0)
+		return (false);
+
+	return (true);
+}
+
+//==============================================================================
+// Recoverable natural-resource validation.
+//
+// Behavioral recovery is deliberately limited to direct-task natural
+// resources. Building-backed gathering, crates, fishing, and player-owned
+// resource exchanges remain outside this path.
+//==============================================================================
+bool isRecoverableNaturalTargetClass(int targetID = -1, int actionID = -1)
+{
+	if (targetID < 0)
+		return (false);
+
+	if (actionID == cActionTypeHunting)
+	{
+		if (kbUnitIsType(targetID, cUnitTypeHuntable) ||
+			kbUnitIsType(targetID, cUnitTypeHerdable))
+		{
+			return (true);
+		}
+		if ((kbUnitIsType(targetID, cUnitTypeTree) == true) &&
+			(kbUnitIsType(targetID, cUnitTypeBuilding) == false) &&
+			(kbUnitGetPlayerID(targetID) == 0))
+		{
+			return (true);
+		}
+		return (false);
+	}
+
+	if (actionID != cActionTypeGather)
+		return (false);
+
+	if ((kbUnitIsType(targetID, cUnitTypeAbstractFruit) == true) &&
+		(kbUnitIsType(targetID, cUnitTypeBuilding) == false) &&
+		(kbUnitIsType(targetID, cUnitTypeypGroveBuilding) == false) &&
+		(kbUnitGetPlayerID(targetID) == 0))
+	{
+		return (true);
+	}
+	if ((kbUnitIsType(targetID, cUnitTypeAbstractMine) == true) &&
+		(kbUnitIsType(targetID, cUnitTypeBuilding) == false) &&
+		(kbUnitIsType(targetID, cUnitTypeAbstractResourceCrate) == false) &&
+		(kbUnitGetPlayerID(targetID) == 0))
+	{
+		return (true);
+	}
+	return (false);
+}
+
+int getRecoverableNaturalTargetAction(int targetID = -1)
+{
+	if (isRecoverableNaturalTargetClass(targetID, cActionTypeHunting))
+		return (cActionTypeHunting);
+	if (isRecoverableNaturalTargetClass(targetID, cActionTypeGather))
+		return (cActionTypeGather);
+	return (-1);
+}
+
+int getRecoverableNaturalTargetKind(int targetID = -1, int actionID = -1)
+{
+	if (isRecoverableNaturalTargetClass(targetID, actionID) == false)
+		return (-1);
+	if (actionID == cActionTypeHunting)
+	{
+		if (kbUnitIsType(targetID, cUnitTypeTree))
+			return (1); // Natural tree.
+		return (0); // Huntable or herdable animal.
+	}
+	if (kbUnitIsType(targetID, cUnitTypeAbstractFruit))
+		return (2); // Natural berry bush.
+	return (3); // Natural mine.
+}
+
+int getRecoverableNaturalResourceType(int targetID = -1, int actionID = -1)
+{
+	int targetKind = getRecoverableNaturalTargetKind(targetID, actionID);
+	if (targetKind < 0)
+		return (-1);
+	if (kbUnitGetPosition(targetID) == cInvalidVector)
+		return (-1);
+
+	if (targetKind == 0)
+	{
+		if (isUsableHuntTarget(targetID))
+			return (cResourceFood);
+		return (-1);
+	}
+	if (targetKind == 1)
+	{
+		if (kbUnitGetResourceAmount(targetID, cResourceWood) > 0.0)
+			return (cResourceWood);
+		return (-1);
+	}
+	if (targetKind == 2)
+	{
+		if (kbUnitGetResourceAmount(targetID, cResourceFood) > 0.0)
+			return (cResourceFood);
+		return (-1);
+	}
+	if (kbUnitGetResourceAmount(targetID, cResourceGold) > 0.0)
+		return (cResourceGold);
+	return (-1);
+}
+
+float getRecoverableNaturalTargetWorkDistance(int targetID = -1, int actionID = -1)
+{
+	if (getRecoverableNaturalTargetKind(targetID, actionID) == 3)
+		return (5.0);
+	return (3.0);
+}
+
+//==============================================================================
+// Natural-target occupancy and admission helpers.
+//
+// Engine worker counts can omit villagers that are still moving toward, or
+// otherwise logically targeting, a natural resource. Combine the engine count
+// with raw villager targets. Animal orders also use short-lived assignment
+// reservations so repeated taskVillagers passes do not overbook a hunt before
+// the engine catches up.
+//==============================================================================
+int countVillagersTargetingResource(int targetID = -1, int actionID = -1)
+{
+	if ((targetID < 0) || (gVillagerQuery < 0))
+		return (0);
+
+	int numResults = kbUnitQueryNumberResults(gVillagerQuery);
+	int count = 0;
+	int index = -1;
+	int unitID = -1;
+	for (index = 0; < numResults)
+	{
+		unitID = kbUnitQueryGetResult(gVillagerQuery, index);
+		if ((kbUnitGetActionType(unitID) == actionID) &&
+			(kbUnitGetTargetUnitID(unitID) == targetID))
+		{
+			count++;
+		}
+	}
+	return (count);
+}
+
+int getResourceTargetEngineWorkerCount(int targetID = -1)
+{
+	if (targetID < 0)
+		return (0);
+
+	int ownerID = kbUnitGetPlayerID(targetID);
+	if (ownerID < 0)
+		ownerID = cMyID;
+
+	xsSetContextPlayer(ownerID);
+	int count = kbUnitGetNumberWorkers(targetID);
+	xsSetContextPlayer(cMyID);
+	if (count < 0)
+		count = 0;
+	return (count);
+}
+
+int manageHuntAssignmentReservations(int targetID = -1, int unitID = -1, int now = -1)
+{
+	const int cHuntReservationCapacity = 200;
+	const int cHuntReservationInterval = 30000;
+
+	static int reservationUnits = -1;
+	static int reservationTargets = -1;
+	static int reservationTimes = -1;
+
+	if (targetID < 0)
+		return (0);
+	if (now < 0)
+		now = xsGetTime();
+
+	if (reservationUnits < 0)
+	{
+		reservationUnits =
+			xsArrayCreateInt(cHuntReservationCapacity, -1, "Hunt reservation units");
+		reservationTargets =
+			xsArrayCreateInt(cHuntReservationCapacity, -1, "Hunt reservation targets");
+		reservationTimes =
+			xsArrayCreateInt(cHuntReservationCapacity, -1, "Hunt reservation times");
+	}
+
+	int index = -1;
+	int trackedUnitID = -1;
+	int trackedTargetID = -1;
+	int trackedTime = -1;
+	int elapsed = -1;
+	int emptyIndex = -1;
+	int oldestIndex = 0;
+	int oldestTime = now;
+
+	if (unitID >= 0)
+	{
+		for (index = 0; < cHuntReservationCapacity)
+		{
+			trackedUnitID = xsArrayGetInt(reservationUnits, index);
+			trackedTime = xsArrayGetInt(reservationTimes, index);
+			if (trackedUnitID == unitID)
+			{
+				emptyIndex = index;
+				break;
+			}
+			if ((trackedUnitID < 0) && (emptyIndex < 0))
+				emptyIndex = index;
+			if (trackedTime < oldestTime)
+			{
+				oldestTime = trackedTime;
+				oldestIndex = index;
+			}
+		}
+
+		if (emptyIndex < 0)
+			emptyIndex = oldestIndex;
+		xsArraySetInt(reservationUnits, emptyIndex, unitID);
+		xsArraySetInt(reservationTargets, emptyIndex, targetID);
+		xsArraySetInt(reservationTimes, emptyIndex, now);
+		return (0);
+	}
+
+	int count = 0;
+	for (index = 0; < cHuntReservationCapacity)
+	{
+		trackedUnitID = xsArrayGetInt(reservationUnits, index);
+		trackedTargetID = xsArrayGetInt(reservationTargets, index);
+		trackedTime = xsArrayGetInt(reservationTimes, index);
+		if ((trackedUnitID < 0) || (trackedTargetID != targetID) || (trackedTime < 0))
+			continue;
+
+		elapsed = now - trackedTime;
+		if (elapsed >= cHuntReservationInterval)
+		{
+			xsArraySetInt(reservationUnits, index, -1);
+			xsArraySetInt(reservationTargets, index, -1);
+			xsArraySetInt(reservationTimes, index, -1);
+			continue;
+		}
+
+		// A Hunting/raw-target pair already contributes to
+		// countVillagersTargetingResource(). Other actions remain pending.
+		if ((kbUnitGetActionType(trackedUnitID) != cActionTypeHunting) ||
+			(kbUnitGetTargetUnitID(trackedUnitID) != targetID))
+			count++;
+	}
+	return (count);
+}
+
+int getResourceTargetLogicalWorkerCount(int targetID = -1, int actionID = -1,
+	int now = -1)
+{
+	int engineWorkers = getResourceTargetEngineWorkerCount(targetID);
+	int rawWorkers = countVillagersTargetingResource(targetID, actionID);
+	int logicalWorkers = engineWorkers;
+	if (rawWorkers > logicalWorkers)
+		logicalWorkers = rawWorkers;
+	if ((actionID == cActionTypeHunting) &&
+		(kbUnitIsType(targetID, cUnitTypeHuntable) ||
+		kbUnitIsType(targetID, cUnitTypeHerdable)))
+	{
+		logicalWorkers += manageHuntAssignmentReservations(targetID, -1, now);
+	}
+	return (logicalWorkers);
+}
+
+int manageGathererRecoveryPressure(int targetID = -1, bool recordRecovery = false,
+	int now = -1)
+{
+	const int cGathererPressureCapacity = 64;
+	const int cGathererPressureWindow = 30000;
+	const int cGathererPressureInterval = 30000;
+
+	static int pressureTargets = -1;
+	static int pressureCounts = -1;
+	static int pressureLastRecoveryTimes = -1;
+	static int pressureUntilTimes = -1;
+	static int latestPressureUntil = -1;
+
+	if (targetID < 0)
+		return (0);
+	if (now < 0)
+		now = xsGetTime();
+	// In the normal case no target is under pressure. Avoid scanning the
+	// bounded table from every candidate-capacity check until a penalty exists.
+	if ((recordRecovery == false) &&
+		((latestPressureUntil < 0) || (latestPressureUntil <= now)))
+	{
+		return (0);
+	}
+	if (pressureTargets < 0)
+	{
+		pressureTargets =
+			xsArrayCreateInt(cGathererPressureCapacity, -1, "Gather pressure targets");
+		pressureCounts =
+			xsArrayCreateInt(cGathererPressureCapacity, 0, "Gather pressure counts");
+		pressureLastRecoveryTimes =
+			xsArrayCreateInt(cGathererPressureCapacity, -1, "Gather pressure recovery times");
+		pressureUntilTimes =
+			xsArrayCreateInt(cGathererPressureCapacity, -1, "Gather pressure until times");
+	}
+
+	int pressureIndex = -1;
+	int emptyIndex = -1;
+	int oldestIndex = 0;
+	int oldestTime = now;
+	int index = -1;
+	int trackedTargetID = -1;
+	int trackedRecoveryTime = -1;
+	for (index = 0; < cGathererPressureCapacity)
+	{
+		trackedTargetID = xsArrayGetInt(pressureTargets, index);
+		trackedRecoveryTime = xsArrayGetInt(pressureLastRecoveryTimes, index);
+		if (trackedTargetID == targetID)
+		{
+			pressureIndex = index;
+			break;
+		}
+		if ((trackedTargetID < 0) && (emptyIndex < 0))
+			emptyIndex = index;
+		if (trackedRecoveryTime < oldestTime)
+		{
+			oldestTime = trackedRecoveryTime;
+			oldestIndex = index;
+		}
+	}
+
+	if (pressureIndex < 0)
+	{
+		if (recordRecovery == false)
+			return (0);
+		pressureIndex = emptyIndex;
+		if (pressureIndex < 0)
+			pressureIndex = oldestIndex;
+		xsArraySetInt(pressureTargets, pressureIndex, targetID);
+		xsArraySetInt(pressureCounts, pressureIndex, 0);
+		xsArraySetInt(pressureLastRecoveryTimes, pressureIndex, -1);
+		xsArraySetInt(pressureUntilTimes, pressureIndex, -1);
+	}
+
+	if (recordRecovery == true)
+	{
+		int recoveryCount = 1;
+		trackedRecoveryTime =
+			xsArrayGetInt(pressureLastRecoveryTimes, pressureIndex);
+		if ((trackedRecoveryTime >= 0) &&
+			((now - trackedRecoveryTime) < cGathererPressureWindow))
+		{
+			recoveryCount = xsArrayGetInt(pressureCounts, pressureIndex) + 1;
+		}
+		xsArraySetInt(pressureCounts, pressureIndex, recoveryCount);
+		xsArraySetInt(pressureLastRecoveryTimes, pressureIndex, now);
+		if (recoveryCount >= 2)
+		{
+			xsArraySetInt(pressureUntilTimes, pressureIndex,
+				now + cGathererPressureInterval);
+			if ((now + cGathererPressureInterval) > latestPressureUntil)
+				latestPressureUntil = now + cGathererPressureInterval;
+		}
+	}
+
+	if (xsArrayGetInt(pressureUntilTimes, pressureIndex) > now)
+		return (1);
+	return (0);
+}
+
+int getRecoveryAdjustedCapacity(int targetID = -1, int normalCapacity = -1,
+	int now = -1)
+{
+	if (normalCapacity < 1)
+		return (0);
+	if (manageGathererRecoveryPressure(targetID, false, now) > 0)
+	{
+		normalCapacity--;
+		if (normalCapacity < 1)
+			normalCapacity = 1;
+	}
+	return (normalCapacity);
+}
+
+int getHuntTargetWorkerCapacity(int targetID = -1, bool liveWildHunt = false,
+	int maximumCapacity = 5, int now = -1)
+{
+	const float cHuntFoodPerWorker = 50.0;
+
+	if ((isUsableHuntTarget(targetID) == false) || (maximumCapacity < 1))
+		return (0);
+	if (liveWildHunt == true)
+	{
+		int liveCapacity = 2;
+		if (liveCapacity > maximumCapacity)
+			liveCapacity = maximumCapacity;
+		return (getRecoveryAdjustedCapacity(targetID, liveCapacity, now));
+	}
+
+	float foodAmount = kbUnitGetResourceAmount(targetID, cResourceFood);
+	int capacity = 1;
+	if (foodAmount > cHuntFoodPerWorker)
+		capacity = 2;
+	if (foodAmount > (2.0 * cHuntFoodPerWorker))
+		capacity = 3;
+	if (foodAmount > (3.0 * cHuntFoodPerWorker))
+		capacity = 4;
+	if (foodAmount > (4.0 * cHuntFoodPerWorker))
+		capacity = 5;
+	if (capacity > maximumCapacity)
+		capacity = maximumCapacity;
+	return (getRecoveryAdjustedCapacity(targetID, capacity, now));
+}
+
+int getRecoverableNaturalTargetWorkerCapacity(int targetID = -1, int now = -1)
+{
+	int actionID = getRecoverableNaturalTargetAction(targetID);
+	int targetKind = getRecoverableNaturalTargetKind(targetID, actionID);
+	if (getRecoverableNaturalResourceType(targetID, actionID) < 0)
+		return (0);
+
+	if (targetKind == 0)
+	{
+		if (kbUnitGetCurrentHitpoints(targetID) > 0.0)
+		{
+			int liveCapacity = 5;
+			if ((kbUnitIsType(targetID, cUnitTypeHuntable) == true) &&
+				(kbUnitIsType(targetID, cUnitTypeHerdable) == false))
+			{
+				liveCapacity = 2;
+			}
+			return (getRecoveryAdjustedCapacity(targetID, liveCapacity, now));
+		}
+
+		int carcassMaximumCapacity = 5;
+		if (kbUnitIsType(targetID, cUnitTypeHerdable))
+			carcassMaximumCapacity = 4;
+		return (getHuntTargetWorkerCapacity(targetID, false,
+			carcassMaximumCapacity, now));
+	}
+	if ((targetKind == 1) || (targetKind == 2))
+		return (getRecoveryAdjustedCapacity(targetID, 5, now));
+	if (targetKind == 3)
+		return (getRecoveryAdjustedCapacity(targetID, 20, now));
+	return (0);
+}
+
+bool shouldReportHuntAssignment(int targetID = -1, int decisionID = -1, int now = -1)
+{
+	const int cHuntAssignmentTraceCapacity = 64;
+	const int cHuntAssignmentTraceInterval = 5000;
+
+	static int assignmentTargets = -1;
+	static int assignmentDecisions = -1;
+	static int assignmentTimes = -1;
+
+	if ((targetID < 0) || (decisionID < 0))
+		return (false);
+	if (assignmentTargets < 0)
+	{
+		assignmentTargets =
+			xsArrayCreateInt(cHuntAssignmentTraceCapacity, -1, "Hunt assignment targets");
+		assignmentDecisions =
+			xsArrayCreateInt(cHuntAssignmentTraceCapacity, -1, "Hunt assignment decisions");
+		assignmentTimes =
+			xsArrayCreateInt(cHuntAssignmentTraceCapacity, -1, "Hunt assignment times");
+	}
+
+	int emptyIndex = -1;
+	int oldestIndex = 0;
+	int oldestTime = now;
+	int index = -1;
+	int trackedTargetID = -1;
+	int trackedDecisionID = -1;
+	int trackedTime = -1;
+	int elapsed = -1;
+	for (index = 0; < cHuntAssignmentTraceCapacity)
+	{
+		trackedTargetID = xsArrayGetInt(assignmentTargets, index);
+		trackedDecisionID = xsArrayGetInt(assignmentDecisions, index);
+		trackedTime = xsArrayGetInt(assignmentTimes, index);
+		if ((trackedTargetID == targetID) && (trackedDecisionID == decisionID))
+		{
+			elapsed = now - trackedTime;
+			if ((trackedTime >= 0) && (elapsed < cHuntAssignmentTraceInterval))
+				return (false);
+			xsArraySetInt(assignmentTimes, index, now);
+			return (true);
+		}
+		if ((trackedTargetID < 0) && (emptyIndex < 0))
+			emptyIndex = index;
+		if (trackedTime < oldestTime)
+		{
+			oldestTime = trackedTime;
+			oldestIndex = index;
+		}
+	}
+
+	if (emptyIndex < 0)
+		emptyIndex = oldestIndex;
+	xsArraySetInt(assignmentTargets, emptyIndex, targetID);
+	xsArraySetInt(assignmentDecisions, emptyIndex, decisionID);
+	xsArraySetInt(assignmentTimes, emptyIndex, now);
+	return (true);
+}
+
+void traceHuntAssignment(int unitID = -1, int targetID = -1, bool liveTarget = false,
+	int capacity = -1, int decisionID = -1, string decision = "")
+{
+	if ((gBetterAIDebug < 1) && (cDebugEconomy == false))
+		return;
+	if (targetID < 0)
+		return;
+
+	int now = xsGetTime();
+	int engineWorkers = getResourceTargetEngineWorkerCount(targetID);
+	int rawWorkers =
+		countVillagersTargetingResource(targetID, cActionTypeHunting);
+	int pendingWorkers = manageHuntAssignmentReservations(targetID, -1, now);
+	int logicalWorkers = engineWorkers;
+	if (rawWorkers > logicalWorkers)
+		logicalWorkers = rawWorkers;
+	logicalWorkers += pendingWorkers;
+	int pressureActive =
+		manageGathererRecoveryPressure(targetID, false, now);
+	int traceDecisionID = decisionID * 100 + logicalWorkers +
+		(pressureActive * 50);
+	if (shouldReportHuntAssignment(targetID, traceDecisionID, now) == false)
+		return;
+
+	debugEvent("ECO-ASSIGN", "u=" + unitID + " t=" + targetID +
+		" live=" + (liveTarget ? "1" : "0") +
+		" food=" + kbUnitGetResourceAmount(targetID, cResourceFood) +
+		" engine=" + engineWorkers + " raw=" + rawWorkers +
+		" pending=" + pendingWorkers + " used=" + logicalWorkers +
+		" cap=" + capacity + " pressure=" + pressureActive +
+		" decision=" + decision);
+}
+
+//==============================================================================
 // updateFoodBreakdown
 //
 // Populate an array with food resources that should be gathered.
@@ -456,6 +1009,8 @@ void updateFoodBreakdown(void)
 	int resourceID = -1;
 	int planID = -1;
 	int numWorkers = -1;
+	int maxWorkers = -1;
+	int now = xsGetTime();
 	int temp = -1;
 
 	// Search for food.
@@ -484,15 +1039,18 @@ void updateFoodBreakdown(void)
 		{
 			resourceID = kbUnitQueryGetResult(gFoodQuery, i);
 
+			if (isUsableHuntTarget(resourceID) == false)
+				continue;
 			if (resourceCloserToAlly(resourceID))
 				continue;
 
-			xsSetContextPlayer(0);
-			numWorkers = kbUnitGetNumberWorkers(resourceID);
-			xsSetContextPlayer(cMyID);
-			// Too many current gatherers.
-			if (numWorkers >= 4)
+			numWorkers = getResourceTargetLogicalWorkerCount(
+				resourceID, cActionTypeHunting, now);
+			maxWorkers = getHuntTargetWorkerCapacity(
+				resourceID, false, 4, now);
+			if (numWorkers >= maxWorkers)
 			{
+				traceHuntAssignment(-1, resourceID, false, maxWorkers, 1, "full");
 				// Still count it because we are gathering it.
 				resourceWorth = resourceWorth + 1;
 				continue;
@@ -511,12 +1069,13 @@ void updateFoodBreakdown(void)
 		kbUnitQuerySetSeeableOnly(gFoodQuery, false);
 		kbUnitQuerySetState(gFoodQuery, cUnitStateAlive);
 		numberResults = kbUnitQueryExecute(gFoodQuery);
-		numWorkers = 0; // If they are alive, there should be 0 workers.
 
 		for (i = 0; < numberResults)
 		{
 			resourceID = kbUnitQueryGetResult(gFoodQuery, i);
 
+			if (isUsableHuntTarget(resourceID) == false)
+				continue;
 			// Avoid unfattened animals.
 			if (kbUnitGetResourceAmount(resourceID, cResourceFood) <
 				kbUnitGetCarryCapacity(resourceID, cResourceFood))
@@ -534,6 +1093,16 @@ void updateFoodBreakdown(void)
 				kbUnitIsType(temp, cUnitTypeypWJToshoguShrine4) == true ||
 				kbUnitIsType(temp, cUnitTypeypWJToshoguShrine5) == true)
 			{
+				continue;
+			}
+
+			numWorkers = getResourceTargetLogicalWorkerCount(
+				resourceID, cActionTypeHunting, now);
+			maxWorkers = getRecoveryAdjustedCapacity(resourceID, 5, now);
+			if (numWorkers >= maxWorkers)
+			{
+				traceHuntAssignment(-1, resourceID, true, maxWorkers, 1, "full");
+				resourceWorth = resourceWorth + 1;
 				continue;
 			}
 
@@ -563,15 +1132,18 @@ void updateFoodBreakdown(void)
 		{
 			resourceID = kbUnitQueryGetResult(gFoodQuery, i);
 
+			if (isUsableHuntTarget(resourceID) == false)
+				continue;
 			if (resourceCloserToAlly(resourceID))
 				continue;
 
-			xsSetContextPlayer(0);
-			numWorkers = kbUnitGetNumberWorkers(resourceID);
-			xsSetContextPlayer(cMyID);
-			// Too many current gatherers.
-			if (numWorkers >= 5)
+			numWorkers = getResourceTargetLogicalWorkerCount(
+				resourceID, cActionTypeHunting, now);
+			maxWorkers = getHuntTargetWorkerCapacity(
+				resourceID, false, 5, now);
+			if (numWorkers >= maxWorkers)
 			{
+				traceHuntAssignment(-1, resourceID, false, maxWorkers, 1, "full");
 				// Still count it because we are gathering it.
 				resourceWorth = resourceWorth + 1;
 				continue;
@@ -596,12 +1168,13 @@ void updateFoodBreakdown(void)
 		kbUnitQuerySetState(gFoodQuery, cUnitStateAlive);
 		kbUnitQuerySetSeeableOnly(gFoodQuery, false);
 		numberResults = kbUnitQueryExecute(gFoodQuery);
-		numWorkers = 0; // If they are alive, there should be 0 workers.
 
 		for (i = 0; < numberResults)
 		{
 			resourceID = kbUnitQueryGetResult(gFoodQuery, i);
 
+			if (isUsableHuntTarget(resourceID) == false)
+				continue;
 			if (resourceCloserToAlly(resourceID))
 				continue;
 
@@ -625,9 +1198,23 @@ void updateFoodBreakdown(void)
 					continue;
 			}
 
+			// Admit up to two villagers to herd/kill a live wild animal. Once it
+			// becomes a carcass, the decaying path admits workers according to
+			// its remaining food.
+			numWorkers = getResourceTargetLogicalWorkerCount(
+				resourceID, cActionTypeHunting, now);
+			maxWorkers = getHuntTargetWorkerCapacity(
+				resourceID, true, 2, now);
+			if (numWorkers >= maxWorkers)
+			{
+				traceHuntAssignment(-1, resourceID, true, maxWorkers, 1, "full");
+				resourceWorth = resourceWorth + 1;
+				continue;
+			}
+
 			arrayPushInt(gFoodResources, resourceID);
 			arrayPushInt(gFoodNumWorkers, numWorkers);
-			arrayPushInt(gMaxFoodWorkers, 5);
+			arrayPushInt(gMaxFoodWorkers, 2);
 			resourceWorth = resourceWorth + 1;
 		}
 
@@ -653,7 +1240,7 @@ void updateFoodBreakdown(void)
 
 			// Too many current gatherers on an Orchard.
 			numWorkers = kbUnitGetNumberWorkers(resourceID);
-			if (numWorkers == 28)
+			if (numWorkers >= 28)
 			{	// Still count it because we are gathering it.
 				resourceWorth = resourceWorth + 1;
 				continue;
@@ -685,18 +1272,21 @@ void updateFoodBreakdown(void)
 		{
 			resourceID = kbUnitQueryGetResult(gFoodQuery, i);
 
-			// Mango Groves are listed as 'AbstractFruit' in protoy.xml.
-			if (kbUnitIsType(resourceID, cUnitTypeypGroveBuilding) == true)
+			// Admit only valid Gaia berry bushes. Mango Groves, Torp bushes,
+			// and other building/player-owned fruit targets stay outside this
+			// natural-resource path.
+			if (getRecoverableNaturalResourceType(
+				resourceID, cActionTypeGather) != cResourceFood)
 				continue;
 
 			if (resourceCloserToAlly(resourceID))
 				continue;
 
 			// Too many current gatherers on Berry Bushes.
-			xsSetContextPlayer(0);
-			numWorkers = kbUnitGetNumberWorkers(resourceID);
-			xsSetContextPlayer(cMyID);
-			if (numWorkers >= 5)
+			numWorkers = getResourceTargetLogicalWorkerCount(
+				resourceID, cActionTypeGather, now);
+			maxWorkers = getRecoveryAdjustedCapacity(resourceID, 5, now);
+			if (numWorkers >= maxWorkers)
 			{
 				// Still count it because we are gathering it.
 				resourceWorth = resourceWorth + 1;
@@ -738,13 +1328,14 @@ void updateFoodBreakdown(void)
 		{
 			resourceID = kbUnitQueryGetResult(gFoodQuery, i);
 			numWorkers = kbUnitGetNumberWorkers(resourceID);
+			maxNumWorkers = 10;
 
 			// Field on Gold or maxed out.
 			if (kbUnitIsType(resourceID, cUnitTypedeField))
 			{
 				if (aiUnitGetTactic(resourceID) == cTacticFieldCoin)
 					continue;
-				else if (numWorkers == 3)
+				else if (numWorkers >= 3)
 				{	// Still count it because we are gathering it.
 					resourceWorth = resourceWorth + 1;
 					continue;
@@ -756,7 +1347,7 @@ void updateFoodBreakdown(void)
 			{
 				if (aiUnitGetTactic(resourceID) == cTacticPaddyCoin)
 					continue;
-				else if (numWorkers == 10)
+				else if (numWorkers >= 10)
 				{	// Still count it because we are gathering it.
 					resourceWorth = resourceWorth + 1;
 					continue;
@@ -767,7 +1358,7 @@ void updateFoodBreakdown(void)
 			{
 				if (aiUnitGetTactic(resourceID) == cTacticHaciendaCoin)
 					continue;
-				else if (numWorkers == 20)
+				else if (numWorkers >= 20)
 				{	// Still count it because we are gathering it.
 					resourceWorth = resourceWorth + 1;
 					continue;
@@ -775,7 +1366,7 @@ void updateFoodBreakdown(void)
 				maxNumWorkers = 20;
 			}
 			// Mill/Farm maxed out.
-			else if (numWorkers == 10)
+			else if (numWorkers >= 10)
 			{	// Still count it because we are gathering it.
 				resourceWorth = resourceWorth + 1;
 				continue;
@@ -846,6 +1437,8 @@ void updateWoodBreakdown(void)
 	int resourceID = -1;
 	int planID = -1;
 	int numWorkers = -1;
+	int maxWorkers = 5;
+	int now = xsGetTime();
 
 	if (gWoodQuery < 0)
 	{
@@ -872,18 +1465,45 @@ void updateWoodBreakdown(void)
 		kbUnitQuerySetState(gWoodQuery, cUnitStateDead);
 		kbUnitQuerySetSeeableOnly(gWoodQuery, true);
 		kbUnitQueryExecute(gWoodQuery);
+
+		kbUnitQuerySetPlayerID(gWoodQuery, cMyID, false);
+		kbUnitQuerySetUnitType(gWoodQuery, cUnitTypeypGroveBuilding);
+		kbUnitQuerySetState(gWoodQuery, cUnitStateAlive);
+		kbUnitQuerySetSeeableOnly(gWoodQuery, false);
+		kbUnitQueryExecute(gWoodQuery);
 		numberResults = kbUnitQueryNumberResults(gWoodQuery);
 
 		for (i = 0; < numberResults)
 		{
 			resourceID = kbUnitQueryGetResult(gWoodQuery, i);
 
-			xsSetContextPlayer(0);
-			numWorkers = kbUnitGetNumberWorkers(resourceID);
-			xsSetContextPlayer(cMyID);
+			maxWorkers = 5;
+			if (kbUnitIsType(resourceID, cUnitTypeypGroveBuilding))
+			{
+				numWorkers = getResourceTargetEngineWorkerCount(resourceID);
+				maxWorkers = 25;
+			}
+			else if (kbUnitIsType(resourceID, cUnitTypeTree))
+			{
+				if (getRecoverableNaturalResourceType(
+					resourceID, cActionTypeHunting) != cResourceWood)
+				{
+					continue;
+				}
+				numWorkers = getResourceTargetLogicalWorkerCount(
+					resourceID, cActionTypeHunting, now);
+				maxWorkers =
+					getRecoveryAdjustedCapacity(resourceID, 5, now);
+			}
+			else
+			{
+				// This helper switches to the target owner only for the worker
+				// count and always restores cMyID before returning.
+				numWorkers = getResourceTargetEngineWorkerCount(resourceID);
+			}
 
 			// Too many current gatherers.
-			if (numWorkers >= 5)
+			if (numWorkers >= maxWorkers)
 				continue;
 
 			if (getDistance(kbUnitGetPosition(resourceID), gHomeBase) > 45)
@@ -918,6 +1538,8 @@ void updateGoldBreakdown(void)
 	int tradingLodge = -1;
 	int planID = -1;
 	int numWorkers = -1;
+	int maxWorkers = 20;
+	int now = xsGetTime();
 
 	if (gGoldQuery < 0)
 	{
@@ -953,7 +1575,7 @@ void updateGoldBreakdown(void)
 				continue;
 
 			numWorkers = kbUnitGetNumberWorkers(resourceID);
-			if (numWorkers == 20)
+			if (numWorkers >= 20)
 			{	// Still count it because we are gathering it.
 				resourceWorth = resourceWorth + 1;
 				continue;
@@ -1000,6 +1622,15 @@ void updateGoldBreakdown(void)
 		for (i = 0; < numberResults)
 		{
 			resourceID = kbUnitQueryGetResult(gGoldQuery, i);
+			maxWorkers = 20;
+
+			// AbstractMine also contains building-backed and crate-like
+			// prototypes. Only a valid Gaia natural mine belongs here.
+			if (getRecoverableNaturalResourceType(
+				resourceID, cActionTypeGather) != cResourceGold)
+			{
+				continue;
+			}
 
 			if (resourceCloserToAlly(resourceID))
 				continue;
@@ -1022,7 +1653,7 @@ void updateGoldBreakdown(void)
 					resourceID = tradingLodge;
 					numWorkers = kbUnitGetNumberWorkers(resourceID);
 					// Too many current gatherers.
-					if (numWorkers == 10)
+					if (numWorkers >= 10)
 					{	// Still count it because we are gathering it.
 						resourceWorth = resourceWorth + 1;
 						continue;
@@ -1031,11 +1662,12 @@ void updateGoldBreakdown(void)
 			}
 			else
 			{
-				xsSetContextPlayer(0);
-				numWorkers = kbUnitGetNumberWorkers(resourceID);
-				xsSetContextPlayer(cMyID);
+				numWorkers = getResourceTargetLogicalWorkerCount(
+					resourceID, cActionTypeGather, now);
+				maxWorkers =
+					getRecoveryAdjustedCapacity(resourceID, 20, now);
 				// Too many current gatherers.
-				if (numWorkers == 20)
+				if (numWorkers >= maxWorkers)
 				{	// Still count it because we are gathering it.
 					resourceWorth = resourceWorth + 1;
 					continue;
@@ -1080,13 +1712,14 @@ void updateGoldBreakdown(void)
 		{
 			resourceID = kbUnitQueryGetResult(gGoldQuery, i);
 			numWorkers = kbUnitGetNumberWorkers(resourceID);
+			maxNumWorkers = 10;
 
 			// Field on Food or maxed out.
 			if (kbUnitIsType(resourceID, cUnitTypedeField))
 			{
 				if (aiUnitGetTactic(resourceID) == cTacticFieldFood)
 					continue;
-				else if (numWorkers == 3)
+				else if (numWorkers >= 3)
 				{	// Still count it because we are gathering it.
 					resourceWorth = resourceWorth + 1;
 					continue;
@@ -1098,7 +1731,7 @@ void updateGoldBreakdown(void)
 			{
 				if (aiUnitGetTactic(resourceID) == cTacticPaddyFood)
 					continue;
-				else if (numWorkers == 10)
+				else if (numWorkers >= 10)
 				{	// Still count it because we are gathering it.
 					resourceWorth = resourceWorth + 1;
 					continue;
@@ -1109,7 +1742,7 @@ void updateGoldBreakdown(void)
 			{
 				if (aiUnitGetTactic(resourceID) == cTacticHaciendaFood)
 					continue;
-				else if (numWorkers == 20)
+				else if (numWorkers >= 20)
 				{	// Still count it because we are gathering it.
 					resourceWorth = resourceWorth + 1;
 					continue;
@@ -1117,7 +1750,7 @@ void updateGoldBreakdown(void)
 				maxNumWorkers = 20;
 			}
 			// Estate maxed out.
-			else if (numWorkers == 10)
+			else if (numWorkers >= 10)
 			{	// Still count it because we are gathering it.
 				resourceWorth = resourceWorth + 1;
 				continue;
@@ -1284,6 +1917,821 @@ void updateGoldFishBreakdown(void)
 }
 
 //==============================================================================
+// The resource IDs, observed worker counts, and per-resource capacities are
+// parallel custom arrays. Report alignment failures before tasking can use a
+// mismatched index.
+//==============================================================================
+void checkResourceArrayInvariants()
+{
+	if (gBetterAIDebug < 1)
+		return;
+	int foodResourceCount = arrayGetSize(gFoodResources);
+	int foodWorkerCount = arrayGetSize(gFoodNumWorkers);
+	int foodCapacityCount = arrayGetSize(gMaxFoodWorkers);
+	if ((foodResourceCount != foodWorkerCount) || (foodResourceCount != foodCapacityCount))
+	{
+		debugEvent("ECO-INVARIANT", "food array mismatch resources=" + foodResourceCount +
+			", workers=" + foodWorkerCount + ", capacities=" + foodCapacityCount);
+	}
+
+	int decayingResourceCount = arrayGetSize(gDecayingAnimals);
+	int decayingWorkerCount = arrayGetSize(gDecayingNumWorkers);
+	if (decayingResourceCount != decayingWorkerCount)
+	{
+		debugEvent("ECO-INVARIANT", "decaying array mismatch resources=" + decayingResourceCount +
+			", workers=" + decayingWorkerCount);
+	}
+
+	int woodResourceCount = arrayGetSize(gWoodResources);
+	int woodWorkerCount = arrayGetSize(gWoodNumWorkers);
+	if (woodResourceCount != woodWorkerCount)
+	{
+		debugEvent("ECO-INVARIANT", "wood array mismatch resources=" + woodResourceCount +
+			", workers=" + woodWorkerCount);
+	}
+
+	int goldResourceCount = arrayGetSize(gGoldResources);
+	int goldWorkerCount = arrayGetSize(gGoldNumWorkers);
+	int goldCapacityCount = arrayGetSize(gMaxGoldWorkers);
+	if ((goldResourceCount != goldWorkerCount) || (goldResourceCount != goldCapacityCount))
+	{
+		debugEvent("ECO-INVARIANT", "gold array mismatch resources=" + goldResourceCount +
+			", workers=" + goldWorkerCount + ", capacities=" + goldCapacityCount);
+	}
+}
+
+//==============================================================================
+// Per-villager natural-resource retry cooldown.
+//
+// Setting targetID >= 0 records a target to avoid. Passing targetID < 0 reads
+// the still-active avoidance target for the unit.
+//==============================================================================
+int manageGathererRecoveryCooldown(int unitID = -1, int targetID = -1, int now = -1)
+{
+	const int cGathererRecoveryCapacity = 200;
+	const int cGathererRecoveryInterval = 30000;
+
+	static int recoveryUnits = -1;
+	static int recoveryTargets = -1;
+	static int recoveryTimes = -1;
+	static int latestRecoveryTime = -1;
+
+	if (unitID < 0)
+		return (-1);
+	if (now < 0)
+		now = xsGetTime();
+	if ((targetID < 0) && ((latestRecoveryTime < 0) ||
+		((now - latestRecoveryTime) >= cGathererRecoveryInterval)))
+	{
+		return (-1);
+	}
+
+	if (recoveryUnits < 0)
+	{
+		recoveryUnits =
+			xsArrayCreateInt(cGathererRecoveryCapacity, -1, "Gatherer recovery units");
+		recoveryTargets =
+			xsArrayCreateInt(cGathererRecoveryCapacity, -1, "Gatherer recovery targets");
+		recoveryTimes =
+			xsArrayCreateInt(cGathererRecoveryCapacity, -1, "Gatherer recovery times");
+	}
+
+	int index = -1;
+	int trackedUnitID = -1;
+	int trackedTime = -1;
+	int elapsed = -1;
+	int emptyIndex = -1;
+	int oldestIndex = 0;
+	int oldestTime = now;
+	for (index = 0; < cGathererRecoveryCapacity)
+	{
+		trackedUnitID = xsArrayGetInt(recoveryUnits, index);
+		trackedTime = xsArrayGetInt(recoveryTimes, index);
+		if (trackedUnitID == unitID)
+		{
+			if (targetID >= 0)
+			{
+				xsArraySetInt(recoveryTargets, index, targetID);
+				xsArraySetInt(recoveryTimes, index, now);
+				latestRecoveryTime = now;
+				return (targetID);
+			}
+
+			elapsed = now - trackedTime;
+			if ((trackedTime >= 0) && (elapsed < cGathererRecoveryInterval))
+				return (xsArrayGetInt(recoveryTargets, index));
+
+			xsArraySetInt(recoveryUnits, index, -1);
+			xsArraySetInt(recoveryTargets, index, -1);
+			xsArraySetInt(recoveryTimes, index, -1);
+			return (-1);
+		}
+		if ((trackedUnitID < 0) && (emptyIndex < 0))
+			emptyIndex = index;
+		if (trackedTime < oldestTime)
+		{
+			oldestTime = trackedTime;
+			oldestIndex = index;
+		}
+	}
+
+	if (targetID < 0)
+		return (-1);
+	if (emptyIndex < 0)
+		emptyIndex = oldestIndex;
+	xsArraySetInt(recoveryUnits, emptyIndex, unitID);
+	xsArraySetInt(recoveryTargets, emptyIndex, targetID);
+	xsArraySetInt(recoveryTimes, emptyIndex, now);
+	latestRecoveryTime = now;
+	return (targetID);
+}
+
+//==============================================================================
+// Observe gatherer progress. The watcher returns one eligible natural target
+// to avoid when a plan-free gatherer is a clearly separated, stalled outlier
+// while closer peers continue depleting the same target. taskVillagers owns
+// all retasking.
+//==============================================================================
+bool shouldReportGathererTargetTransition(int targetID = -1, int reasonID = -1, int now = -1)
+{
+	const int cGathererTransitionTargetCapacity = 64;
+	const int cGathererTransitionTargetInterval = 5000;
+
+	static int transitionTargets = -1;
+	static int transitionReasons = -1;
+	static int transitionTimes = -1;
+
+	if ((targetID < 0) || (reasonID < 0))
+		return(true);
+
+	if (transitionTargets < 0)
+	{
+		transitionTargets =
+			xsArrayCreateInt(cGathererTransitionTargetCapacity, -1, "Gather transition targets");
+		transitionReasons =
+			xsArrayCreateInt(cGathererTransitionTargetCapacity, -1, "Gather transition reasons");
+		transitionTimes =
+			xsArrayCreateInt(cGathererTransitionTargetCapacity, -1, "Gather transition times");
+	}
+
+	int emptyIndex = -1;
+	int oldestIndex = 0;
+	int oldestTime = now;
+	int index = -1;
+	int trackedTarget = -1;
+	int trackedReason = -1;
+	int trackedTime = -1;
+	for (index = 0; < cGathererTransitionTargetCapacity)
+	{
+		trackedTarget = xsArrayGetInt(transitionTargets, index);
+		trackedReason = xsArrayGetInt(transitionReasons, index);
+		trackedTime = xsArrayGetInt(transitionTimes, index);
+
+		if ((trackedTarget == targetID) && (trackedReason == reasonID))
+		{
+			if ((trackedTime >= 0) && ((now - trackedTime) < cGathererTransitionTargetInterval))
+				return(false);
+
+			xsArraySetInt(transitionTimes, index, now);
+			return(true);
+		}
+
+		if ((trackedTarget < 0) && (emptyIndex < 0))
+			emptyIndex = index;
+		if (trackedTime < oldestTime)
+		{
+			oldestTime = trackedTime;
+			oldestIndex = index;
+		}
+	}
+
+	if (emptyIndex < 0)
+		emptyIndex = oldestIndex;
+	xsArraySetInt(transitionTargets, emptyIndex, targetID);
+	xsArraySetInt(transitionReasons, emptyIndex, reasonID);
+	xsArraySetInt(transitionTimes, emptyIndex, now);
+	return(true);
+}
+
+int getGatherTelemetryResourceType(int targetID = -1, int actionID = -1)
+{
+	if (targetID < 0)
+	{
+		return(-1);
+	}
+
+	if (actionID == cActionTypeHunting)
+	{
+		if (kbUnitIsType(targetID, cUnitTypeTree))
+		{
+			return(cResourceWood);
+		}
+		if (kbUnitIsType(targetID, cUnitTypeHuntable) ||
+			kbUnitIsType(targetID, cUnitTypeHerdable))
+		{
+			return(cResourceFood);
+		}
+		return(-1);
+	}
+
+	if (actionID != cActionTypeGather)
+	{
+		return(-1);
+	}
+	if (kbUnitIsType(targetID, cUnitTypedeHacienda))
+	{
+		if (aiUnitGetTactic(targetID) == cTacticHaciendaCoin)
+		{
+			return(cResourceGold);
+		}
+		return(cResourceFood);
+	}
+	if (kbUnitIsType(targetID, cUnitTypeypRicePaddy) ||
+		kbUnitIsType(targetID, cUnitTypedeField))
+	{
+		if (aiUnitGetTactic(targetID) == gFarmGoldTactic)
+		{
+			return(cResourceGold);
+		}
+		return(cResourceFood);
+	}
+	if (kbUnitIsType(targetID, cUnitTypeGold))
+	{
+		return(cResourceGold);
+	}
+	if (kbUnitIsType(targetID, cUnitTypeFood))
+	{
+		return(cResourceFood);
+	}
+	if (kbUnitIsType(targetID, cUnitTypeWood))
+	{
+		return(cResourceWood);
+	}
+
+	float foodAmount = kbUnitGetResourceAmount(targetID, cResourceFood);
+	float woodAmount = kbUnitGetResourceAmount(targetID, cResourceWood);
+	float goldAmount = kbUnitGetResourceAmount(targetID, cResourceGold);
+	if ((foodAmount > 0.0) && (foodAmount >= woodAmount) && (foodAmount >= goldAmount))
+	{
+		return(cResourceFood);
+	}
+	if ((woodAmount > 0.0) && (woodAmount >= goldAmount))
+	{
+		return(cResourceWood);
+	}
+	if (goldAmount > 0.0)
+	{
+		return(cResourceGold);
+	}
+	return(-1);
+}
+
+
+int watchGathererTelemetry(int unitID = -1, int actionID = -1)
+{
+	const int cGathererWatchCapacity = 200;
+	const int cGathererWatchWindow = 4000;
+	const int cGathererWatchSuspectInterval = 30000;
+	const int cGathererWatchTransitionInterval = 5000;
+	const int cGathererWatchStaleInterval = 5000;
+
+	static int watchUnits = -1;
+	static int watchActions = -1;
+	static int watchTargets = -1;
+	static int watchRawTargets = -1;
+	static int watchResourceTypes = -1;
+	static int watchPositions = -1;
+	static int watchTargetPositions = -1;
+	static int watchCarriedFood = -1;
+	static int watchTargetFood = -1;
+	static int watchElapsedTimes = -1;
+	static int watchTargetStartTimes = -1;
+	static int watchWindowStartTimes = -1;
+	static int watchWindowStartPositions = -1;
+	static int watchWindowStartDistances = -1;
+	static int watchWindowBestDistances = -1;
+	static int watchWindowStartCarriedFood = -1;
+	static int watchWindowStartTargetFood = -1;
+	static int watchStalledWindows = -1;
+	static int watchLastSuspectTimes = -1;
+	static int watchLastTransitionTimes = -1;
+	static int watchLastSeenTimes = -1;
+
+	bool telemetryEnabled = (gBetterAIDebug >= 1) || (cDebugEconomy == true);
+	if (unitID < 0)
+		return (-1);
+	// Only current direct-task gatherers enter the target lookup and watch scan.
+	if ((actionID != cActionTypeHunting) && (actionID != cActionTypeGather))
+		return (-1);
+	// With telemetry disabled, only the explicit natural-resource whitelist
+	// enters the behavioral watcher. Debug mode may still observe other direct
+	// Gather targets without granting them behavioral recovery.
+	if (telemetryEnabled == false)
+	{
+		if (getRecoverableNaturalResourceType(
+			kbUnitGetTargetUnitID(unitID), actionID) < 0)
+		{
+			// Invalidate any prior recovery sample just as full telemetry would
+			// when observing a switch away from a recoverable natural target.
+			if (watchUnits >= 0)
+			{
+				int resetWatchIndex = -1;
+				for (resetWatchIndex = 0; < cGathererWatchCapacity)
+				{
+					if (xsArrayGetInt(watchUnits, resetWatchIndex) == unitID)
+					{
+						xsArraySetInt(watchUnits, resetWatchIndex, -1);
+						xsArraySetInt(watchLastSeenTimes, resetWatchIndex, -1);
+						break;
+					}
+				}
+			}
+			return (-1);
+		}
+	}
+
+	if (watchUnits < 0)
+	{
+		watchUnits = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch units");
+		watchActions = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch actions");
+		watchTargets = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch targets");
+		watchRawTargets = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch raw targets");
+		watchResourceTypes = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch resource types");
+		watchPositions = xsArrayCreateVector(cGathererWatchCapacity, cInvalidVector, "Gather watch positions");
+		watchTargetPositions =
+			xsArrayCreateVector(cGathererWatchCapacity, cInvalidVector, "Gather watch target positions");
+		watchCarriedFood = xsArrayCreateFloat(cGathererWatchCapacity, -1.0, "Gather watch carried resource");
+		watchTargetFood = xsArrayCreateFloat(cGathererWatchCapacity, -1.0, "Gather watch target resource");
+		watchElapsedTimes = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch elapsed times");
+		watchTargetStartTimes = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch target start times");
+		watchWindowStartTimes = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch window start times");
+		watchWindowStartPositions =
+			xsArrayCreateVector(cGathererWatchCapacity, cInvalidVector, "Gather watch window start positions");
+		watchWindowStartDistances =
+			xsArrayCreateFloat(cGathererWatchCapacity, -1.0, "Gather watch window start distances");
+		watchWindowBestDistances =
+			xsArrayCreateFloat(cGathererWatchCapacity, -1.0, "Gather watch window best distances");
+		watchWindowStartCarriedFood =
+			xsArrayCreateFloat(cGathererWatchCapacity, -1.0, "Gather watch window start carried resource");
+		watchWindowStartTargetFood =
+			xsArrayCreateFloat(cGathererWatchCapacity, -1.0, "Gather watch window start target resource");
+		watchStalledWindows = xsArrayCreateInt(cGathererWatchCapacity, 0, "Gather watch stalled windows");
+		watchLastSuspectTimes = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch last suspect times");
+		watchLastTransitionTimes =
+			xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch last transition times");
+		watchLastSeenTimes = xsArrayCreateInt(cGathererWatchCapacity, -1, "Gather watch last seen times");
+	}
+
+	int now = xsGetTime();
+	bool verboseTelemetry =
+		(telemetryEnabled == true) &&
+		((cDebugEconomy == true) || (gBetterAIDebug >= 2));
+	int rawTargetID = kbUnitGetTargetUnitID(unitID);
+	int resourceType = getGatherTelemetryResourceType(rawTargetID, actionID);
+	bool rawTargetIsGatherable = false;
+	bool targetHasFiniteResource = false;
+	vector targetPosition = cInvalidVector;
+	float targetFood = -1.0;
+	if ((rawTargetID >= 0) && (resourceType >= 0))
+	{
+		rawTargetIsGatherable = true;
+		targetHasFiniteResource = (kbUnitIsType(rawTargetID, cUnitTypeBuilding) == false);
+		targetPosition = kbUnitGetPosition(rawTargetID);
+		targetFood = kbUnitGetResourceAmount(rawTargetID, resourceType);
+	}
+
+	int gatheringTargetID = -1;
+	if ((rawTargetID >= 0) && rawTargetIsGatherable &&
+		(targetPosition != cInvalidVector) &&
+		((targetHasFiniteResource == false) || (targetFood > 0.0)))
+	{
+		gatheringTargetID = rawTargetID;
+	}
+
+	vector currentPosition = kbUnitGetPosition(unitID);
+	float carriedFood = -1.0;
+	if (resourceType >= 0)
+	{
+		carriedFood = kbUnitGetResourceAmount(unitID, resourceType);
+	}
+	float targetDistance = -1.0;
+	if (targetPosition != cInvalidVector)
+		targetDistance = getDistance(currentPosition, targetPosition);
+
+	int watchIndex = -1;
+	int emptyIndex = -1;
+	int oldestIndex = 0;
+	int oldestTime = now;
+	int trackedUnitID = -1;
+	int lastSeenTime = -1;
+	int index = -1;
+	for (index = 0; < cGathererWatchCapacity)
+	{
+		trackedUnitID = xsArrayGetInt(watchUnits, index);
+		if (trackedUnitID == unitID)
+		{
+			watchIndex = index;
+			break;
+		}
+		if ((trackedUnitID < 0) && (emptyIndex < 0))
+			emptyIndex = index;
+
+		lastSeenTime = xsArrayGetInt(watchLastSeenTimes, index);
+		if (lastSeenTime < oldestTime)
+		{
+			oldestTime = lastSeenTime;
+			oldestIndex = index;
+		}
+	}
+
+	if (watchIndex < 0)
+	{
+		watchIndex = emptyIndex;
+		if (watchIndex < 0)
+			watchIndex = oldestIndex;
+
+		xsArraySetInt(watchUnits, watchIndex, unitID);
+		xsArraySetInt(watchActions, watchIndex, -1);
+		xsArraySetInt(watchTargets, watchIndex, -1);
+		xsArraySetInt(watchRawTargets, watchIndex, -1);
+		xsArraySetInt(watchResourceTypes, watchIndex, -1);
+		xsArraySetVector(watchPositions, watchIndex, cInvalidVector);
+		xsArraySetVector(watchTargetPositions, watchIndex, cInvalidVector);
+		xsArraySetFloat(watchCarriedFood, watchIndex, -1.0);
+		xsArraySetFloat(watchTargetFood, watchIndex, -1.0);
+		xsArraySetInt(watchElapsedTimes, watchIndex, -1);
+		xsArraySetInt(watchTargetStartTimes, watchIndex, -1);
+		xsArraySetInt(watchWindowStartTimes, watchIndex, -1);
+		xsArraySetVector(watchWindowStartPositions, watchIndex, cInvalidVector);
+		xsArraySetFloat(watchWindowStartDistances, watchIndex, -1.0);
+		xsArraySetFloat(watchWindowBestDistances, watchIndex, -1.0);
+		xsArraySetFloat(watchWindowStartCarriedFood, watchIndex, -1.0);
+		xsArraySetFloat(watchWindowStartTargetFood, watchIndex, -1.0);
+		xsArraySetInt(watchStalledWindows, watchIndex, 0);
+		xsArraySetInt(watchLastSuspectTimes, watchIndex, -1);
+		xsArraySetInt(watchLastTransitionTimes, watchIndex, -1);
+	}
+	else
+	{
+		lastSeenTime = xsArrayGetInt(watchLastSeenTimes, watchIndex);
+		if ((lastSeenTime >= 0) && ((now - lastSeenTime) > cGathererWatchStaleInterval))
+		{
+			xsArraySetInt(watchActions, watchIndex, -1);
+			xsArraySetInt(watchTargets, watchIndex, -1);
+			xsArraySetInt(watchRawTargets, watchIndex, -1);
+			xsArraySetInt(watchResourceTypes, watchIndex, -1);
+			xsArraySetVector(watchPositions, watchIndex, cInvalidVector);
+			xsArraySetVector(watchTargetPositions, watchIndex, cInvalidVector);
+			xsArraySetFloat(watchCarriedFood, watchIndex, -1.0);
+			xsArraySetFloat(watchTargetFood, watchIndex, -1.0);
+			xsArraySetInt(watchElapsedTimes, watchIndex, -1);
+			xsArraySetInt(watchTargetStartTimes, watchIndex, -1);
+			xsArraySetInt(watchWindowStartTimes, watchIndex, -1);
+			xsArraySetVector(watchWindowStartPositions, watchIndex, cInvalidVector);
+			xsArraySetFloat(watchWindowStartDistances, watchIndex, -1.0);
+			xsArraySetFloat(watchWindowBestDistances, watchIndex, -1.0);
+			xsArraySetFloat(watchWindowStartCarriedFood, watchIndex, -1.0);
+			xsArraySetFloat(watchWindowStartTargetFood, watchIndex, -1.0);
+			xsArraySetInt(watchStalledWindows, watchIndex, 0);
+			xsArraySetInt(watchLastSuspectTimes, watchIndex, -1);
+			xsArraySetInt(watchLastTransitionTimes, watchIndex, -1);
+		}
+	}
+	xsArraySetInt(watchLastSeenTimes, watchIndex, now);
+
+	int previousAction = xsArrayGetInt(watchActions, watchIndex);
+	int previousTarget = xsArrayGetInt(watchTargets, watchIndex);
+	int previousRawTarget = xsArrayGetInt(watchRawTargets, watchIndex);
+	int previousResourceType = xsArrayGetInt(watchResourceTypes, watchIndex);
+	float previousTargetFood = xsArrayGetFloat(watchTargetFood, watchIndex);
+	int previousTargetStartTime = xsArrayGetInt(watchTargetStartTimes, watchIndex);
+	int previousElapsed = 0;
+	if (previousTargetStartTime >= 0)
+		previousElapsed = now - previousTargetStartTime;
+
+	bool targetTransition = false;
+	int transitionReasonID = -1;
+	string transitionReason = "";
+	if (((previousAction == cActionTypeHunting) || (previousAction == cActionTypeGather)) &&
+		(previousTarget >= 0))
+	{
+		if (rawTargetID < 0)
+		{
+			targetTransition = true;
+			transitionReasonID = 0;
+			transitionReason = "raw-lost";
+		}
+		else if (rawTargetID != previousTarget)
+		{
+			targetTransition = true;
+			transitionReasonID = 1;
+			transitionReason = "target-changed";
+		}
+		else if ((rawTargetIsGatherable == false) || (resourceType != previousResourceType))
+		{
+			targetTransition = true;
+			transitionReasonID = 2;
+			transitionReason = "type-lost";
+		}
+		else if (targetPosition == cInvalidVector)
+		{
+			targetTransition = true;
+			transitionReasonID = 3;
+			transitionReason = "position-invalid";
+		}
+		else if ((targetHasFiniteResource == true) && (targetFood <= 0.0))
+		{
+			targetTransition = true;
+			transitionReasonID = 4;
+			transitionReason = "resource-empty";
+		}
+	}
+
+	if (targetTransition == true)
+	{
+		float previousTargetCurrentFood = -1.0;
+		vector previousTargetCurrentPosition = cInvalidVector;
+		bool previousTargetStillGatherable = false;
+		if (previousTarget == rawTargetID)
+		{
+			previousTargetCurrentFood = targetFood;
+			previousTargetCurrentPosition = targetPosition;
+			previousTargetStillGatherable = rawTargetIsGatherable;
+		}
+		else if ((verboseTelemetry == true) && (previousTarget >= 0) &&
+			(previousResourceType >= 0))
+		{
+			previousTargetCurrentFood =
+				kbUnitGetResourceAmount(previousTarget, previousResourceType);
+			previousTargetCurrentPosition = kbUnitGetPosition(previousTarget);
+			previousTargetStillGatherable =
+				(getGatherTelemetryResourceType(previousTarget, previousAction) >= 0);
+		}
+
+		int lastTransitionTime = xsArrayGetInt(watchLastTransitionTimes, watchIndex);
+		int timeSinceLastTransition = now - lastTransitionTime;
+		if ((telemetryEnabled == true) &&
+			((lastTransitionTime < 0) ||
+			(timeSinceLastTransition >= cGathererWatchTransitionInterval)))
+		{
+			if (shouldReportGathererTargetTransition(previousTarget, transitionReasonID, now) == true)
+			{
+				// Keep curated output far below the engine's observed 511-byte
+				// formatted-line crash boundary. Detailed vectors are separate
+				// level-2 lines with bounded field sets.
+				debugEvent("ECO-WATCH", "transition u=" + unitID + " reason=" + transitionReason +
+					" action=" + previousAction + ">" + actionID +
+					" target=" + previousTarget + ">" + rawTargetID +
+					" res=" + previousResourceType + ">" + resourceType +
+					" amount=" + previousTargetFood + ">" + previousTargetCurrentFood +
+					" ms=" + previousElapsed);
+				if (verboseTelemetry == true)
+				{
+					debugEconomy("ECO-WATCH transition-detail u=" + unitID +
+						" prevRaw=" + previousRawTarget + " raw=" + rawTargetID +
+						" gatherable=" + (previousTargetStillGatherable ? "true" : "false") +
+						" carried=" + carriedFood + " distance=" + targetDistance);
+					debugEconomy("ECO-WATCH transition-pos u=" + unitID +
+						" villager=" + currentPosition + " rawTarget=" + targetPosition);
+					debugEconomy("ECO-WATCH transition-prev-pos u=" + unitID +
+						" previousTarget=" + previousTargetCurrentPosition);
+				}
+			}
+			xsArraySetInt(watchLastTransitionTimes, watchIndex, now);
+		}
+
+		// A depleted or invalid same target is no longer a usable telemetry target.
+		if ((rawTargetID == previousTarget) &&
+			((rawTargetIsGatherable == false) || (targetPosition == cInvalidVector) ||
+			((targetHasFiniteResource == true) && (targetFood <= 0.0))))
+		{
+			gatheringTargetID = -1;
+		}
+	}
+
+	if ((gatheringTargetID < 0) || (previousAction != actionID) ||
+		(previousTarget != gatheringTargetID) || (previousResourceType != resourceType))
+	{
+		xsArraySetInt(watchTargetStartTimes, watchIndex, now);
+		xsArraySetInt(watchWindowStartTimes, watchIndex, now);
+		xsArraySetVector(watchWindowStartPositions, watchIndex, currentPosition);
+		xsArraySetFloat(watchWindowStartDistances, watchIndex, targetDistance);
+		xsArraySetFloat(watchWindowBestDistances, watchIndex, targetDistance);
+		xsArraySetFloat(watchWindowStartCarriedFood, watchIndex, carriedFood);
+		xsArraySetFloat(watchWindowStartTargetFood, watchIndex, targetFood);
+		xsArraySetInt(watchStalledWindows, watchIndex, 0);
+		xsArraySetInt(watchLastSuspectTimes, watchIndex, -1);
+	}
+	else
+	{
+		float bestDistance = xsArrayGetFloat(watchWindowBestDistances, watchIndex);
+		if ((targetDistance >= 0.0) &&
+			((bestDistance < 0.0) || (targetDistance < bestDistance)))
+		{
+			xsArraySetFloat(watchWindowBestDistances, watchIndex, targetDistance);
+		}
+	}
+
+	xsArraySetInt(watchActions, watchIndex, actionID);
+	xsArraySetInt(watchTargets, watchIndex, gatheringTargetID);
+	xsArraySetInt(watchRawTargets, watchIndex, rawTargetID);
+	xsArraySetInt(watchResourceTypes, watchIndex, resourceType);
+	xsArraySetVector(watchPositions, watchIndex, currentPosition);
+	xsArraySetVector(watchTargetPositions, watchIndex, targetPosition);
+	xsArraySetFloat(watchCarriedFood, watchIndex, carriedFood);
+	xsArraySetFloat(watchTargetFood, watchIndex, targetFood);
+
+	int elapsed = 0;
+	if (gatheringTargetID >= 0)
+		elapsed = now - xsArrayGetInt(watchTargetStartTimes, watchIndex);
+	xsArraySetInt(watchElapsedTimes, watchIndex, elapsed);
+
+	if (gatheringTargetID < 0)
+		return (-1);
+
+	int windowElapsed = now - xsArrayGetInt(watchWindowStartTimes, watchIndex);
+	if (verboseTelemetry == true)
+	{
+		debugEconomy("ECO-WATCH sample u=" + unitID + " action=" + actionID +
+			" res=" + resourceType + " target=" + gatheringTargetID + " raw=" +
+			rawTargetID + " distance=" + targetDistance + " carried=" + carriedFood +
+			" amount=" + targetFood + " ms=" + elapsed);
+		debugEconomy("ECO-WATCH sample-pos u=" + unitID +
+			" villager=" + currentPosition + " target=" + targetPosition);
+	}
+
+	if (windowElapsed < cGathererWatchWindow)
+		return (-1);
+
+	float movement = getDistance(currentPosition, xsArrayGetVector(watchWindowStartPositions, watchIndex));
+	float carriedFoodProgress = carriedFood - xsArrayGetFloat(watchWindowStartCarriedFood, watchIndex);
+	float targetFoodProgress = xsArrayGetFloat(watchWindowStartTargetFood, watchIndex) - targetFood;
+	float startDistance = xsArrayGetFloat(watchWindowStartDistances, watchIndex);
+	float bestWindowDistance = xsArrayGetFloat(watchWindowBestDistances, watchIndex);
+	float approachProgress = -1.0;
+	if ((startDistance >= 0.0) && (bestWindowDistance >= 0.0))
+	{
+		approachProgress = startDistance - bestWindowDistance;
+	}
+	bool individualNoProgress =
+		(movement <= 0.25) &&
+		(approachProgress <= 0.25) &&
+		(carriedFoodProgress <= 0.01);
+	int stalledWindowCount = xsArrayGetInt(watchStalledWindows, watchIndex);
+	if (individualNoProgress == true)
+	{
+		stalledWindowCount++;
+	}
+	else
+	{
+		stalledWindowCount = 0;
+	}
+	xsArraySetInt(watchStalledWindows, watchIndex, stalledWindowCount);
+
+	if (verboseTelemetry == true)
+	{
+		debugEconomy("ECO-WATCH window u=" + unitID + " move=" + movement +
+			" approach=" + approachProgress + " carriedDelta=" + carriedFoodProgress +
+			" sharedDelta=" + targetFoodProgress + " stalled=" + stalledWindowCount);
+	}
+
+	int recoveryTargetID = -1;
+	if (stalledWindowCount >= 2)
+	{
+		int eligibleResourceType =
+			getRecoverableNaturalResourceType(gatheringTargetID, actionID);
+		int targetKind =
+			getRecoverableNaturalTargetKind(gatheringTargetID, actionID);
+		float workDistance =
+			getRecoverableNaturalTargetWorkDistance(gatheringTargetID, actionID);
+		int peerResultCount = kbUnitQueryNumberResults(gVillagerQuery);
+		int peerIndex = 0;
+		int peerUnitID = -1;
+		int closerPeerCount = 0;
+		float peerDistance = -1.0;
+		float closestPeerDistance = 9999.0;
+		vector peerPosition = cInvalidVector;
+		for (peerIndex = 0; < peerResultCount)
+		{
+			peerUnitID = kbUnitQueryGetResult(gVillagerQuery, peerIndex);
+			if ((peerUnitID == unitID) ||
+				(kbUnitGetActionType(peerUnitID) != actionID) ||
+				(kbUnitGetTargetUnitID(peerUnitID) != gatheringTargetID))
+			{
+				continue;
+			}
+			peerPosition = kbUnitGetPosition(peerUnitID);
+			if (peerPosition == cInvalidVector)
+			{
+				continue;
+			}
+			peerDistance = getDistance(peerPosition, targetPosition);
+			if (peerDistance < closestPeerDistance)
+			{
+				closestPeerDistance = peerDistance;
+			}
+			if (peerDistance < targetDistance)
+			{
+				closerPeerCount++;
+			}
+		}
+
+		bool hasPeer = (closestPeerDistance < 9999.0);
+		bool offsetFromPeer =
+			(hasPeer == true) && (targetDistance > (closestPeerDistance + 1.5));
+		bool groupNoProgress =
+			(targetHasFiniteResource == true) &&
+			(targetFoodProgress <= 0.01) &&
+			(targetDistance > workDistance);
+		bool reportCandidate = offsetFromPeer || groupNoProgress;
+
+		// The carried-resource syscall has been uninformative for some gatherers,
+		// so behavioral recovery requires a much stronger outlier pattern than
+		// the observational candidate: a plan-free gatherer remains away from an
+		// eligible natural target while a closer same-action peer depletes it.
+		bool recoverBlockedGatherer =
+			(eligibleResourceType == resourceType) &&
+			(targetHasFiniteResource == true) &&
+			(individualNoProgress == true) &&
+			(targetFoodProgress > 0.01) &&
+			(closerPeerCount > 0) &&
+			(closestPeerDistance <= workDistance) &&
+			(offsetFromPeer == true) &&
+			(targetDistance > workDistance) &&
+			(kbUnitGetPlanID(unitID) < 0);
+		if (recoverBlockedGatherer == true)
+		{
+			int activeRecoveryTargetID =
+				manageGathererRecoveryCooldown(unitID, -1, now);
+			if (activeRecoveryTargetID < 0)
+			{
+				recoveryTargetID =
+					manageGathererRecoveryCooldown(unitID, gatheringTargetID, now);
+				int pressureActive =
+					manageGathererRecoveryPressure(gatheringTargetID, true, now);
+				if (telemetryEnabled == true)
+				{
+					int recoveryCapacity =
+						getRecoverableNaturalTargetWorkerCapacity(
+							gatheringTargetID, now);
+					int engineWorkers =
+						getResourceTargetEngineWorkerCount(gatheringTargetID);
+					int rawWorkers =
+						countVillagersTargetingResource(
+							gatheringTargetID, actionID);
+					int targetLiveState = -1;
+					if (targetKind == 0)
+						targetLiveState =
+							(kbUnitGetCurrentHitpoints(gatheringTargetID) > 0.0 ? 1 : 0);
+					debugEvent("ECO-RECOVER", "u=" + unitID + " t=" + gatheringTargetID +
+						" kind=" + targetKind + " res=" + resourceType +
+						" live=" + targetLiveState + " remain=" + targetFood +
+						" dist=" + targetDistance + " shared=" + targetFoodProgress +
+						" peers=" + closerPeerCount + " closest=" + closestPeerDistance +
+						" engine=" + engineWorkers + " raw=" + rawWorkers +
+						" cap=" + recoveryCapacity + " pressure=" + pressureActive +
+						" windows=" + stalledWindowCount + " cooldown=30000");
+				}
+			}
+		}
+
+		if ((telemetryEnabled == true) && (reportCandidate == true))
+		{
+			int lastSuspectTime = xsArrayGetInt(watchLastSuspectTimes, watchIndex);
+			int timeSinceLastSuspect = now - lastSuspectTime;
+			if ((lastSuspectTime < 0) ||
+				(timeSinceLastSuspect >= cGathererWatchSuspectInterval))
+			{
+				debugEvent("ECO-WATCH", "candidate u=" + unitID + " action=" + actionID +
+					" res=" + resourceType + " target=" + gatheringTargetID + " dist=" +
+					targetDistance + " move=" + movement + " approach=" + approachProgress +
+					" shared=" + targetFoodProgress + " windows=" + stalledWindowCount +
+					" peers=" + closerPeerCount + " closest=" + closestPeerDistance);
+				if (verboseTelemetry == true)
+				{
+					debugEconomy("ECO-WATCH candidate-detail u=" + unitID + " plan=" +
+						kbUnitGetPlanID(unitID) + " carried=" + carriedFood + " carriedDelta=" +
+						carriedFoodProgress + " workers=" +
+						getResourceTargetEngineWorkerCount(gatheringTargetID));
+					debugEconomy("ECO-WATCH candidate-pos u=" + unitID +
+						" villager=" + currentPosition + " target=" + targetPosition);
+				}
+				xsArraySetInt(watchLastSuspectTimes, watchIndex, now);
+			}
+		}
+	}
+
+	// Begin another independent movement/progress observation window on the same target.
+	xsArraySetInt(watchWindowStartTimes, watchIndex, now);
+	xsArraySetVector(watchWindowStartPositions, watchIndex, currentPosition);
+	xsArraySetFloat(watchWindowStartDistances, watchIndex, targetDistance);
+	xsArraySetFloat(watchWindowBestDistances, watchIndex, targetDistance);
+	xsArraySetFloat(watchWindowStartCarriedFood, watchIndex, carriedFood);
+	xsArraySetFloat(watchWindowStartTargetFood, watchIndex, targetFood);
+	return (recoveryTargetID);
+}
+
+//==============================================================================
 //
 // taskVillagers
 //
@@ -1292,7 +2740,7 @@ void updateGoldFishBreakdown(void)
 //==============================================================================
 rule taskVillagers
 inactive
-minInterval 2
+minInterval 1 // Experimental responsiveness trial; recovery windows remain elapsed-time based.
 {
 	if (gVillagerQuery < 0)
 	{
@@ -1328,6 +2776,24 @@ minInterval 2
 	int actionID = -1;
 	int resourceID = -1;
 	int planID = -1;
+	int recoveryAvoidTargetID = -1;
+	int telemetryRecoveryTargetID = -1;
+	bool forceGathererRecovery = false;
+	int currentNaturalActionID = -1;
+	int currentNaturalResourceType = -1;
+	bool bypassCurrentNaturalTarget = false;
+	int candidateActionID = -1;
+	int candidateResourceType = -1;
+	int candidateCapacity = -1;
+	int candidateWorkerCount = -1;
+	bool candidateInvalid = false;
+	int selectionNow = -1;
+	int decayingCapacity = -1;
+	int decayingMaximumCapacity = 5;
+	int assignmentCapacity = -1;
+	int reservationResult = -1;
+	bool assignedAnimalTarget = false;
+	bool assignedLiveTarget = false;
 
 	// Used to compare resources within each resource type, to select the
 	// "best" one relative to the villager under consideration.
@@ -1344,6 +2810,7 @@ minInterval 2
 	int foodID = -1;
 	int foodIndex = -1;
 	float foodDistance = 0.0;
+	bool foodFromDecayingArray = false;
 	int woodID = -1;
 	int woodIndex = -1;
 	float woodDistance = 0.0;
@@ -1403,6 +2870,7 @@ minInterval 2
 
 	// Search for gold.
 	updateGoldBreakdown();
+	checkResourceArrayInvariants();
 
 	if (arrayGetSize(gWoodResources) < 2) // Until I configure arrayGetSize to return 0.
 	{
@@ -1418,6 +2886,18 @@ minInterval 2
 	{
 		unitID = kbUnitQueryGetResult(gVillagerQuery, i);
 		actionID = kbUnitGetActionType(unitID);
+		recoveryAvoidTargetID = -1;
+		telemetryRecoveryTargetID = -1;
+		forceGathererRecovery = false;
+		if ((actionID == cActionTypeHunting) || (actionID == cActionTypeGather))
+		{
+			telemetryRecoveryTargetID = watchGathererTelemetry(unitID, actionID);
+			if (telemetryRecoveryTargetID >= 0)
+				recoveryAvoidTargetID = telemetryRecoveryTargetID;
+		}
+		if (recoveryAvoidTargetID < 0)
+			recoveryAvoidTargetID =
+				manageGathererRecoveryCooldown(unitID, -1, xsGetTime());
 		targetLocation = cInvalidVector;
 		switch (actionID)
 		{
@@ -1443,16 +2923,30 @@ minInterval 2
 			pop = 1;
 
 		resourceID = kbUnitGetTargetUnitID(unitID);
+		forceGathererRecovery =
+			(recoveryAvoidTargetID >= 0) && (resourceID == recoveryAvoidTargetID);
+		currentNaturalActionID =
+			getRecoverableNaturalTargetAction(resourceID);
+		currentNaturalResourceType =
+			getRecoverableNaturalResourceType(
+				resourceID, currentNaturalActionID);
+		bypassCurrentNaturalTarget =
+			(currentNaturalActionID == actionID) &&
+			(forceGathererRecovery ||
+			(currentNaturalResourceType < 0));
 		if (resourceID >= 0)
 		{
 			// Currently on crates/berries/mines/mill units/estate units.
 			// and *not* assigned to a plan.
 			if (actionID == cActionTypeGather)
 			{
-				// 'deHacienda' is listed as '<unittype>Gold</unittype>', so we need to account for this first.
-				if (kbUnitIsType(resourceID, cUnitTypedeHacienda))
+				// Valid productive assignments remain untouched. Only the
+				// specifically recovered (or now-invalid) natural target falls
+				// through to fresh selection.
+				if (bypassCurrentNaturalTarget == false)
 				{
-					if (aiUnitGetTactic(resourceID) == cTacticHaciendaCoin)
+					if ((currentNaturalActionID == cActionTypeGather) &&
+						(currentNaturalResourceType == cResourceGold))
 					{
 						if (numGoldVills > 0)
 						{
@@ -1460,26 +2954,33 @@ minInterval 2
 							continue;
 						}
 					}
-					else if (numFoodVills > 0) // Then it must be food tactic.
+					else if ((currentNaturalActionID == cActionTypeGather) &&
+						(currentNaturalResourceType == cResourceFood))
 					{
-						numFoodVills = numFoodVills - pop;
-						continue;
+						if (numFoodVills > 0)
+						{
+							numFoodVills = numFoodVills - pop;
+							continue;
+						}
 					}
-				}
-				else if (kbUnitIsType(resourceID, cUnitTypeGold))
-				{
-					if (numGoldVills > 0)
+					// 'deHacienda' is listed as '<unittype>Gold</unittype>', so we need to account for this first.
+					else if (kbUnitIsType(resourceID, cUnitTypedeHacienda))
 					{
-						numGoldVills = numGoldVills - pop;
-						continue;
+						if (aiUnitGetTactic(resourceID) == cTacticHaciendaCoin)
+						{
+							if (numGoldVills > 0)
+							{
+								numGoldVills = numGoldVills - pop;
+								continue;
+							}
+						}
+						else if (numFoodVills > 0) // Then it must be food tactic.
+						{
+							numFoodVills = numFoodVills - pop;
+							continue;
+						}
 					}
-				}
-				// 'ypRicePaddy' and 'deField' are listed as '<unittype>Food</unittype>' in protoy.xml
-				else if (kbUnitIsType(resourceID, cUnitTypeypRicePaddy) || kbUnitIsType(resourceID, cUnitTypedeField))
-				{	// NOTE: I do not think there are 'team' rice paddy or field cards, unlike the Hacienda.
-					// Otherwise I should distinguish paddy from field tactics by their constant ID in the odd case 
-					// that some civ gets a one of these from an ally shipment and cannot evaluate this.
-					if (aiUnitGetTactic(resourceID) == gFarmGoldTactic)
+					else if (kbUnitIsType(resourceID, cUnitTypeGold))
 					{
 						if (numGoldVills > 0)
 						{
@@ -1487,19 +2988,33 @@ minInterval 2
 							continue;
 						}
 					}
-					else if (numFoodVills > 0) // Then it must be food tactic.
-					{
-						numFoodVills = numFoodVills - pop;
-						continue;
+					// 'ypRicePaddy' and 'deField' are listed as '<unittype>Food</unittype>' in protoy.xml
+					else if (kbUnitIsType(resourceID, cUnitTypeypRicePaddy) || kbUnitIsType(resourceID, cUnitTypedeField))
+					{	// NOTE: I do not think there are 'team' rice paddy or field cards, unlike the Hacienda.
+						// Otherwise I should distinguish paddy from field tactics by their constant ID in the odd case
+						// that some civ gets a one of these from an ally shipment and cannot evaluate this.
+						if (aiUnitGetTactic(resourceID) == gFarmGoldTactic)
+						{
+							if (numGoldVills > 0)
+							{
+								numGoldVills = numGoldVills - pop;
+								continue;
+							}
+						}
+						else if (numFoodVills > 0) // Then it must be food tactic.
+						{
+							numFoodVills = numFoodVills - pop;
+							continue;
+						}
 					}
-				}
-				// Mills and Farms.
-				else if (kbUnitIsType(resourceID, cUnitTypeFood))
-				{
-					if (numFoodVills > 0)
+					// Mills and Farms.
+					else if (kbUnitIsType(resourceID, cUnitTypeFood))
 					{
-						numFoodVills = numFoodVills - pop;
-						continue;
+						if (numFoodVills > 0)
+						{
+							numFoodVills = numFoodVills - pop;
+							continue;
+						}
 					}
 				}
 			}
@@ -1508,16 +3023,16 @@ minInterval 2
 			{
 				if (kbUnitIsType(resourceID, cUnitTypeTree))
 				{
-					if (numWoodVills > 0)
+					if ((bypassCurrentNaturalTarget == false) &&
+						(numWoodVills > 0))
 					{
 						numWoodVills = numWoodVills - pop;
 						continue;
 					}
 				}
-				else if (kbUnitIsType(resourceID, cUnitTypeHuntable) ||
-					kbUnitIsType(resourceID, cUnitTypeHerdable))
+				else if (isUsableHuntTarget(resourceID))
 				{
-					if (numFoodVills > 0)
+					if ((numFoodVills > 0) && (forceGathererRecovery == false))
 					{
 						numFoodVills = numFoodVills - pop;
 						continue;	
@@ -1527,9 +3042,17 @@ minInterval 2
 		}
 
 		location = kbUnitGetPosition(unitID);
+		selectionNow = xsGetTime();
+		foodID = -1;
+		foodIndex = -1;
 		foodDistance = 9999.0;
+		woodID = -1;
+		woodIndex = -1;
 		woodDistance = 9999.0;
+		goldID = -1;
+		goldIndex = -1;
 		goldDistance = 9999.0;
+		foodFromDecayingArray = false;
 
 		// ========================================
 		// Food Resources.
@@ -1543,10 +3066,29 @@ minInterval 2
 			// many workers.
 			for (tempIndex = 0; < arrayGetSize(gDecayingAnimals))
 			{	// Should not matter for Japanese as resourceID will always be -1.
-				if (arrayGetInt(gDecayingNumWorkers, tempIndex) >= 5)
-					continue;
-
 				resourceID = arrayGetInt(gDecayingAnimals, tempIndex);
+				if (resourceID == recoveryAvoidTargetID)
+				{
+					resourceID = -1;
+					continue;
+				}
+				if (isUsableHuntTarget(resourceID) == false)
+				{
+					resourceID = -1;
+					continue;
+				}
+				decayingMaximumCapacity = 5;
+				if (kbUnitIsType(resourceID, cUnitTypeHerdable))
+					decayingMaximumCapacity = 4;
+				decayingCapacity = getHuntTargetWorkerCapacity(
+					resourceID, false, decayingMaximumCapacity, selectionNow);
+				if (arrayGetInt(gDecayingNumWorkers, tempIndex) >= decayingCapacity)
+				{
+					traceHuntAssignment(-1, resourceID, false,
+						decayingCapacity, 1, "full");
+					resourceID = -1;
+					continue;
+				}
 				break;
 			}
 
@@ -1562,9 +3104,21 @@ minInterval 2
 				for (j = tempIndex + 1; < arrayGetSize(gDecayingAnimals))
 				{
 					resourceID = arrayGetInt(gDecayingAnimals, j);
-
-					if (arrayGetInt(gDecayingNumWorkers, j) >= 5)
+					if (resourceID == recoveryAvoidTargetID)
 						continue;
+					if (isUsableHuntTarget(resourceID) == false)
+						continue;
+					decayingMaximumCapacity = 5;
+					if (kbUnitIsType(resourceID, cUnitTypeHerdable))
+						decayingMaximumCapacity = 4;
+					decayingCapacity = getHuntTargetWorkerCapacity(
+						resourceID, false, decayingMaximumCapacity, selectionNow);
+					if (arrayGetInt(gDecayingNumWorkers, j) >= decayingCapacity)
+					{
+						traceHuntAssignment(-1, resourceID, false,
+							decayingCapacity, 1, "full");
+						continue;
+					}
 
 					tempDistance = getDistance(location, kbUnitGetPosition(resourceID));
 					if (tempDistance < closestDistance)
@@ -1580,6 +3134,7 @@ minInterval 2
 				foodID = closestResourceID;
 				foodIndex = closestResourceIndex;
 				foodDistance = closestDistance;
+				foodFromDecayingArray = true;
 				goto PrioritizeDecayingAnimal;
 			}
 			//
@@ -1594,10 +3149,55 @@ minInterval 2
 			// many workers.
 			for (tempIndex = 0; < arrayGetSize(gFoodResources))
 			{
-				if (arrayGetInt(gFoodNumWorkers, tempIndex) >= arrayGetInt(gMaxFoodWorkers, tempIndex))
-					continue;
-
 				resourceID = arrayGetInt(gFoodResources, tempIndex);
+				if (resourceID == recoveryAvoidTargetID)
+				{
+					resourceID = -1;
+					continue;
+				}
+				candidateActionID =
+					getRecoverableNaturalTargetAction(resourceID);
+				candidateResourceType =
+					getRecoverableNaturalResourceType(
+						resourceID, candidateActionID);
+				candidateCapacity =
+					arrayGetInt(gMaxFoodWorkers, tempIndex);
+				if (candidateActionID >= 0)
+				{
+					if (candidateResourceType != cResourceFood)
+					{
+						resourceID = -1;
+						continue;
+					}
+					candidateCapacity =
+						getRecoverableNaturalTargetWorkerCapacity(
+							resourceID, selectionNow);
+				}
+				if ((candidateCapacity < 1) ||
+					(arrayGetInt(gFoodNumWorkers, tempIndex) >=
+					candidateCapacity))
+				{
+					if (kbUnitIsType(resourceID, cUnitTypeHuntable) ||
+						kbUnitIsType(resourceID, cUnitTypeHerdable))
+					{
+						traceHuntAssignment(-1, resourceID, true,
+							candidateCapacity, 1, "full");
+					}
+					resourceID = -1;
+					continue;
+				}
+				if (kbUnitGetPosition(resourceID) == cInvalidVector)
+				{
+					resourceID = -1;
+					continue;
+				}
+				if ((kbUnitIsType(resourceID, cUnitTypeHuntable) ||
+					kbUnitIsType(resourceID, cUnitTypeHerdable)) &&
+					(isUsableHuntTarget(resourceID) == false))
+				{
+					resourceID = -1;
+					continue;
+				}
 				break;
 			}
 
@@ -1613,9 +3213,43 @@ minInterval 2
 				for (j = tempIndex + 1; < arrayGetSize(gFoodResources))
 				{
 					resourceID = arrayGetInt(gFoodResources, j);
-
-					if (arrayGetInt(gFoodNumWorkers, j) >= arrayGetInt(gMaxFoodWorkers, j))
+					if (resourceID == recoveryAvoidTargetID)
 						continue;
+					candidateActionID =
+						getRecoverableNaturalTargetAction(resourceID);
+					candidateResourceType =
+						getRecoverableNaturalResourceType(
+							resourceID, candidateActionID);
+					candidateCapacity =
+						arrayGetInt(gMaxFoodWorkers, j);
+					if (candidateActionID >= 0)
+					{
+						if (candidateResourceType != cResourceFood)
+							continue;
+						candidateCapacity =
+							getRecoverableNaturalTargetWorkerCapacity(
+								resourceID, selectionNow);
+					}
+					if ((candidateCapacity < 1) ||
+						(arrayGetInt(gFoodNumWorkers, j) >=
+						candidateCapacity))
+					{
+						if (kbUnitIsType(resourceID, cUnitTypeHuntable) ||
+							kbUnitIsType(resourceID, cUnitTypeHerdable))
+						{
+							traceHuntAssignment(-1, resourceID, true,
+								candidateCapacity, 1, "full");
+						}
+						continue;
+					}
+					if (kbUnitGetPosition(resourceID) == cInvalidVector)
+						continue;
+					if ((kbUnitIsType(resourceID, cUnitTypeHuntable) ||
+						kbUnitIsType(resourceID, cUnitTypeHerdable)) &&
+						(isUsableHuntTarget(resourceID) == false))
+					{
+						continue;
+					}
 
 					tempDistance = getDistance(location, kbUnitGetPosition(resourceID));
 					if (tempDistance < closestDistance)
@@ -1631,6 +3265,7 @@ minInterval 2
 				foodID = closestResourceID;
 				foodIndex = closestResourceIndex;
 				foodDistance = closestDistance;
+				foodFromDecayingArray = false;
 			}
 			//
 			// End of check for all other land food resources.
@@ -1654,13 +3289,43 @@ minInterval 2
 			// many workers.
 			for (tempIndex = 0; < arrayGetSize(gWoodResources))
 			{
-				if (kbUnitIsType(resourceID, cUnitTypeypGroveBuilding) == true &&
-					arrayGetInt(gWoodNumWorkers, tempIndex) == 25)
-					continue;
-				else if (arrayGetInt(gWoodNumWorkers, tempIndex) >= 5)
-					continue;
-
 				resourceID = arrayGetInt(gWoodResources, tempIndex);
+				if (resourceID == recoveryAvoidTargetID)
+				{
+					resourceID = -1;
+					continue;
+				}
+				candidateActionID =
+					getRecoverableNaturalTargetAction(resourceID);
+				candidateResourceType =
+					getRecoverableNaturalResourceType(
+						resourceID, candidateActionID);
+				candidateCapacity = 5;
+				if (kbUnitIsType(resourceID, cUnitTypeypGroveBuilding))
+					candidateCapacity = 25;
+				else if (candidateActionID >= 0)
+				{
+					if (candidateResourceType != cResourceWood)
+					{
+						resourceID = -1;
+						continue;
+					}
+					candidateCapacity =
+						getRecoverableNaturalTargetWorkerCapacity(
+							resourceID, selectionNow);
+				}
+				if ((candidateCapacity < 1) ||
+					(arrayGetInt(gWoodNumWorkers, tempIndex) >=
+					candidateCapacity))
+				{
+					resourceID = -1;
+					continue;
+				}
+				if (kbUnitGetPosition(resourceID) == cInvalidVector)
+				{
+					resourceID = -1;
+					continue;
+				}
 				break;
 			}
 
@@ -1676,11 +3341,29 @@ minInterval 2
 				for (j = tempIndex + 1; < arrayGetSize(gWoodResources))
 				{
 					resourceID = arrayGetInt(gWoodResources, j);
-
-					if (kbUnitIsType(resourceID, cUnitTypeypGroveBuilding) == true &&
-						arrayGetInt(gWoodNumWorkers, j) == 25)
+					if (resourceID == recoveryAvoidTargetID)
 						continue;
-					else if (arrayGetInt(gWoodNumWorkers, j) >= 5)
+					candidateActionID =
+						getRecoverableNaturalTargetAction(resourceID);
+					candidateResourceType =
+						getRecoverableNaturalResourceType(
+							resourceID, candidateActionID);
+					candidateCapacity = 5;
+					if (kbUnitIsType(resourceID, cUnitTypeypGroveBuilding))
+						candidateCapacity = 25;
+					else if (candidateActionID >= 0)
+					{
+						if (candidateResourceType != cResourceWood)
+							continue;
+						candidateCapacity =
+							getRecoverableNaturalTargetWorkerCapacity(
+								resourceID, selectionNow);
+					}
+					if ((candidateCapacity < 1) ||
+						(arrayGetInt(gWoodNumWorkers, j) >=
+						candidateCapacity))
+						continue;
+					if (kbUnitGetPosition(resourceID) == cInvalidVector)
 						continue;
 
 					tempDistance = getDistance(location, kbUnitGetPosition(resourceID));
@@ -1713,10 +3396,42 @@ minInterval 2
 			// many workers.
 			for (tempIndex = 0; < arrayGetSize(gGoldResources))
 			{
-				if (arrayGetInt(gGoldNumWorkers, tempIndex) >= arrayGetInt(gMaxGoldWorkers, tempIndex))
-					continue;
-
 				resourceID = arrayGetInt(gGoldResources, tempIndex);
+				if (resourceID == recoveryAvoidTargetID)
+				{
+					resourceID = -1;
+					continue;
+				}
+				candidateActionID =
+					getRecoverableNaturalTargetAction(resourceID);
+				candidateResourceType =
+					getRecoverableNaturalResourceType(
+						resourceID, candidateActionID);
+				candidateCapacity =
+					arrayGetInt(gMaxGoldWorkers, tempIndex);
+				if (candidateActionID >= 0)
+				{
+					if (candidateResourceType != cResourceGold)
+					{
+						resourceID = -1;
+						continue;
+					}
+					candidateCapacity =
+						getRecoverableNaturalTargetWorkerCapacity(
+							resourceID, selectionNow);
+				}
+				if ((candidateCapacity < 1) ||
+					(arrayGetInt(gGoldNumWorkers, tempIndex) >=
+					candidateCapacity))
+				{
+					resourceID = -1;
+					continue;
+				}
+				if (kbUnitGetPosition(resourceID) == cInvalidVector)
+				{
+					resourceID = -1;
+					continue;
+				}
 				break;
 			}
 
@@ -1732,8 +3447,28 @@ minInterval 2
 				for (j = tempIndex + 1; < arrayGetSize(gGoldResources))
 				{
 					resourceID = arrayGetInt(gGoldResources, j);
-
-					if (arrayGetInt(gGoldNumWorkers, j) >= arrayGetInt(gMaxGoldWorkers, j))
+					if (resourceID == recoveryAvoidTargetID)
+						continue;
+					candidateActionID =
+						getRecoverableNaturalTargetAction(resourceID);
+					candidateResourceType =
+						getRecoverableNaturalResourceType(
+							resourceID, candidateActionID);
+					candidateCapacity =
+						arrayGetInt(gMaxGoldWorkers, j);
+					if (candidateActionID >= 0)
+					{
+						if (candidateResourceType != cResourceGold)
+							continue;
+						candidateCapacity =
+							getRecoverableNaturalTargetWorkerCapacity(
+								resourceID, selectionNow);
+					}
+					if ((candidateCapacity < 1) ||
+						(arrayGetInt(gGoldNumWorkers, j) >=
+						candidateCapacity))
+						continue;
+					if (kbUnitGetPosition(resourceID) == cInvalidVector)
 						continue;
 
 					tempDistance = getDistance(location, kbUnitGetPosition(resourceID));
@@ -1756,12 +3491,184 @@ minInterval 2
 		// End Gold Resources.
 		// ========================================
 
+		candidateInvalid = false;
+		if (foodID >= 0)
+		{
+			if ((foodID == recoveryAvoidTargetID) ||
+				(kbUnitGetPosition(foodID) == cInvalidVector))
+			{
+				candidateInvalid = true;
+			}
+			candidateActionID =
+				getRecoverableNaturalTargetAction(foodID);
+			candidateResourceType =
+				getRecoverableNaturalResourceType(
+					foodID, candidateActionID);
+			candidateCapacity = -1;
+			candidateWorkerCount = -1;
+			if (foodFromDecayingArray == true)
+			{
+				if ((foodIndex >= 0) &&
+					(foodIndex < arrayGetSize(gDecayingNumWorkers)))
+				{
+					decayingMaximumCapacity = 5;
+					if (kbUnitIsType(foodID, cUnitTypeHerdable))
+						decayingMaximumCapacity = 4;
+					candidateCapacity = getHuntTargetWorkerCapacity(
+						foodID, false, decayingMaximumCapacity, selectionNow);
+					candidateWorkerCount =
+						arrayGetInt(gDecayingNumWorkers, foodIndex);
+				}
+				else
+				{
+					candidateInvalid = true;
+				}
+			}
+			else if ((foodIndex >= 0) &&
+				(foodIndex < arrayGetSize(gFoodNumWorkers)) &&
+				(foodIndex < arrayGetSize(gMaxFoodWorkers)))
+			{
+				candidateCapacity =
+					arrayGetInt(gMaxFoodWorkers, foodIndex);
+				candidateWorkerCount =
+					arrayGetInt(gFoodNumWorkers, foodIndex);
+			}
+			else
+			{
+				candidateInvalid = true;
+			}
+			if (candidateActionID >= 0)
+			{
+				if (candidateResourceType != cResourceFood)
+					candidateInvalid = true;
+				else
+					candidateCapacity =
+						getRecoverableNaturalTargetWorkerCapacity(
+							foodID, selectionNow);
+			}
+			if ((candidateCapacity < 1) ||
+				(candidateWorkerCount >= candidateCapacity))
+			{
+				candidateInvalid = true;
+			}
+			if (candidateInvalid == true)
+			{
+				foodID = -1;
+				foodIndex = -1;
+				foodDistance = 9999.0;
+			}
+		}
+
+		candidateInvalid = false;
+		if (woodID >= 0)
+		{
+			if ((woodID == recoveryAvoidTargetID) ||
+				(kbUnitGetPosition(woodID) == cInvalidVector) ||
+				(woodIndex < 0) ||
+				(woodIndex >= arrayGetSize(gWoodNumWorkers)))
+			{
+				candidateInvalid = true;
+			}
+			candidateActionID =
+				getRecoverableNaturalTargetAction(woodID);
+			candidateResourceType =
+				getRecoverableNaturalResourceType(
+					woodID, candidateActionID);
+			candidateCapacity = 5;
+			if (kbUnitIsType(woodID, cUnitTypeypGroveBuilding))
+				candidateCapacity = 25;
+			else if (candidateActionID >= 0)
+			{
+				if (candidateResourceType != cResourceWood)
+					candidateInvalid = true;
+				else
+					candidateCapacity =
+						getRecoverableNaturalTargetWorkerCapacity(
+							woodID, selectionNow);
+			}
+			if (candidateInvalid == false)
+				candidateWorkerCount =
+					arrayGetInt(gWoodNumWorkers, woodIndex);
+			else
+				candidateWorkerCount = candidateCapacity;
+			if ((candidateCapacity < 1) ||
+				(candidateWorkerCount >= candidateCapacity))
+			{
+				candidateInvalid = true;
+			}
+			if (candidateInvalid == true)
+			{
+				woodID = -1;
+				woodIndex = -1;
+				woodDistance = 9999.0;
+			}
+		}
+
+		candidateInvalid = false;
+		if (goldID >= 0)
+		{
+			if ((goldID == recoveryAvoidTargetID) ||
+				(kbUnitGetPosition(goldID) == cInvalidVector) ||
+				(goldIndex < 0) ||
+				(goldIndex >= arrayGetSize(gGoldNumWorkers)) ||
+				(goldIndex >= arrayGetSize(gMaxGoldWorkers)))
+			{
+				candidateInvalid = true;
+			}
+			candidateActionID =
+				getRecoverableNaturalTargetAction(goldID);
+			candidateResourceType =
+				getRecoverableNaturalResourceType(
+					goldID, candidateActionID);
+			if (candidateInvalid == false)
+			{
+				candidateCapacity =
+					arrayGetInt(gMaxGoldWorkers, goldIndex);
+				candidateWorkerCount =
+					arrayGetInt(gGoldNumWorkers, goldIndex);
+			}
+			else
+			{
+				candidateCapacity = 0;
+				candidateWorkerCount = 0;
+			}
+			if (candidateActionID >= 0)
+			{
+				if (candidateResourceType != cResourceGold)
+					candidateInvalid = true;
+				else
+					candidateCapacity =
+						getRecoverableNaturalTargetWorkerCapacity(
+							goldID, selectionNow);
+			}
+			if ((candidateCapacity < 1) ||
+				(candidateWorkerCount >= candidateCapacity))
+			{
+				candidateInvalid = true;
+			}
+			if (candidateInvalid == true)
+			{
+				goldID = -1;
+				goldIndex = -1;
+				goldDistance = 9999.0;
+			}
+		}
+
+		if ((foodID < 0) && (woodID < 0) && (goldID < 0))
+		{
+			if (forceGathererRecovery == true)
+				aiTaskUnitMove(unitID, gHomeBase);
+			continue;
+		}
+
 		if (foodDistance < woodDistance) // Food is closer than Wood.
 		{
 			if (foodDistance < goldDistance) // Food is closer than Gold.
 			{
-				if (kbUnitIsType(foodID, cUnitTypeHuntable) && /* arrayGetInt(gFoodNumWorkers, foodIndex) == 0 && */
-					kbUnitGetCurrentHitpoints(foodID) >= kbUnitGetMaximumHitpoints(foodID))
+				if ((foodFromDecayingArray == false) &&
+					(kbUnitIsType(foodID, cUnitTypeHuntable) == true) &&
+					(kbUnitGetMaximumHitpoints(foodID) > 0.0) &&
+					(kbUnitGetCurrentHitpoints(foodID) >= kbUnitGetMaximumHitpoints(foodID)))
 				{
 					// Swedish should try to herd huntables toward nearby Torps.
 					if (cMyCiv == cCivDESwedish)
@@ -1781,16 +3688,65 @@ minInterval 2
 					aiTaskUnitMove(unitID, (targetLocation + (kbUnitGetPosition(foodID) - targetLocation) +
 						xsVectorNormalize(kbUnitGetPosition(foodID) - targetLocation) * 16.0));
 					aiTaskUnitWork(unitID, foodID, true);
-
-					// Update the number of workers on the food unit.
-					arraySetInt(gFoodNumWorkers, foodIndex, (arrayGetInt(gFoodNumWorkers, foodIndex) + 1));
 				}
 				else
 				{
 					aiTaskUnitWork(unitID, foodID);
+				}
 
-					// Update the number of workers on the food unit.
-					arraySetInt(gDecayingNumWorkers, foodIndex, (arrayGetInt(gDecayingNumWorkers, foodIndex) + 1));
+				// The decaying and ordinary food branches share this tasking block.
+				// Update the counter that belongs to the array which supplied foodID.
+				if (foodFromDecayingArray == true)
+				{
+					if ((foodIndex >= 0) && (foodIndex < arrayGetSize(gDecayingNumWorkers)))
+					{
+						arraySetInt(gDecayingNumWorkers, foodIndex,
+							arrayGetInt(gDecayingNumWorkers, foodIndex) + 1);
+					}
+					else
+					{
+						debugEvent("ECO-INVARIANT", "invalid decaying food index " + foodIndex +
+							" for resource " + foodID);
+					}
+				}
+				else
+				{
+					if ((foodIndex >= 0) && (foodIndex < arrayGetSize(gFoodNumWorkers)))
+					{
+						arraySetInt(gFoodNumWorkers, foodIndex,
+							arrayGetInt(gFoodNumWorkers, foodIndex) + 1);
+					}
+					else
+					{
+						debugEvent("ECO-INVARIANT", "invalid ordinary food index " + foodIndex +
+							" for resource " + foodID);
+					}
+				}
+
+				assignedAnimalTarget =
+					(kbUnitIsType(foodID, cUnitTypeHuntable) == true) ||
+					(kbUnitIsType(foodID, cUnitTypeHerdable) == true);
+				if (assignedAnimalTarget == true)
+				{
+					assignedLiveTarget = (foodFromDecayingArray == false);
+					reservationResult =
+						manageHuntAssignmentReservations(foodID, unitID, xsGetTime());
+					if (foodFromDecayingArray == true)
+					{
+						decayingMaximumCapacity = 5;
+						if (kbUnitIsType(foodID, cUnitTypeHerdable))
+							decayingMaximumCapacity = 4;
+						assignmentCapacity = getHuntTargetWorkerCapacity(
+							foodID, false, decayingMaximumCapacity, selectionNow);
+					}
+					else
+					{
+						assignmentCapacity =
+							getRecoverableNaturalTargetWorkerCapacity(
+								foodID, selectionNow);
+					}
+					traceHuntAssignment(unitID, foodID, assignedLiveTarget,
+						assignmentCapacity, 0, "assign");
 				}
 				numFoodVills = numFoodVills - pop;
 			}
@@ -2055,7 +4011,20 @@ minInterval 10
 {
 	int mode = 0;
 	int numAbuns = -1;
-	static int abunDefendPlan = -1;
+	if (gHealerPlan >= 0 && aiPlanGetState(gHealerPlan) < 0)
+	{
+		debugEvent("MIL-HEALER", "recover stale Abun plan id=" + gHealerPlan);
+		gHealerPlan = -1;
+	}
+	else if (gHealerPlan >= 0 &&
+		(aiPlanGetType(gHealerPlan) != cPlanCombat ||
+		aiPlanGetVariableInt(gHealerPlan, cCombatPlanCombatType, 0) != cCombatPlanCombatTypeDefend))
+	{
+		debugEvent("MIL-INVARIANT", "replace invalid Abun plan id=" + gHealerPlan +
+			" type=" + aiPlanGetType(gHealerPlan));
+		aiPlanDestroy(gHealerPlan);
+		gHealerPlan = -1;
+	}
 	if (getHomeBaseThreatened())
 		mode = 1;
 	switch (mode)
@@ -2064,10 +4033,12 @@ minInterval 10
 		{
 			if (kbUnitCount(cMyID, cUnitTypedeMountainMonastery, cUnitStateAlive) < 0)
 				break;
-			if (abunDefendPlan >= 0)
+			if (gHealerPlan >= 0)
 			{
-				aiPlanDestroy(abunDefendPlan);
-				abunDefendPlan = -1;
+				debugEvent("MIL-HEALER", "destroy emergency Abun plan id=" + gHealerPlan +
+					" reason=peaceful-mode");
+				aiPlanDestroy(gHealerPlan);
+				gHealerPlan = -1;
 			}
 			int abunQuery = createSimpleUnitQuery(cUnitTypedeAbun);
 			numAbuns = kbUnitQueryExecute(abunQuery);
@@ -2102,19 +4073,63 @@ minInterval 10
 		case 1:
 		{
 			numAbuns = kbUnitCount(cMyID, cUnitTypedeAbun, cUnitStateAlive);
-			if (abunDefendPlan < 0)
+			int mainBaseID = kbBaseGetMainID(cMyID);
+			if (mainBaseID < 0)
 			{
-				abunDefendPlan = aiPlanCreate("Abun Defend Plan", cPlanDefend);
-				aiPlanSetVariableVector(abunDefendPlan, cDefendPlanDefendPoint, 0, gHomeBase);
-				aiPlanSetVariableFloat(abunDefendPlan, cDefendPlanEngageRange, 0, cvDefenseReflexRadiusActive);
-				aiPlanSetVariableInt(abunDefendPlan, cDefendPlanAttackTypeID, 0, cUnitTypeUnit);
-				aiPlanSetVariableInt(abunDefendPlan, cDefendPlanRefreshFrequency, 0, 10);
-				aiPlanAddUnitType(abunDefendPlan, cUnitTypedeAbun, numAbuns, numAbuns, numAbuns);
-				aiPlanSetDesiredPriority(abunDefendPlan, 99);
-				aiPlanSetActive(abunDefendPlan);
+				debugEvent("MIL-INVARIANT", "cannot create Abun emergency plan: no main base");
+				break;
+			}
+			vector gatherPoint = kbBaseGetMilitaryGatherPoint(cMyID, mainBaseID);
+			vector homePosition = kbBaseGetLocation(cMyID, mainBaseID);
+			if (gatherPoint == cInvalidVector)
+			{
+				gatherPoint = gHomeBase;
+			}
+			if (homePosition == cInvalidVector)
+			{
+				homePosition = gHomeBase;
+			}
+
+			if (gHealerPlan < 0)
+			{
+				gHealerPlan = aiPlanCreate("Abun Defend Plan", cPlanCombat);
+				if (gHealerPlan < 0)
+				{
+					debugEvent("MIL-INVARIANT", "failed to create Abun cPlanCombat emergency plan");
+					break;
+				}
+				aiPlanSetVariableInt(gHealerPlan, cCombatPlanCombatType, 0, cCombatPlanCombatTypeDefend);
+				aiPlanSetVariableInt(gHealerPlan, cCombatPlanTargetMode, 0, cCombatPlanTargetModeBase);
+				aiPlanSetVariableInt(gHealerPlan, cCombatPlanTargetPlayerID, 0, cMyID);
+				aiPlanSetVariableInt(gHealerPlan, cCombatPlanTargetBaseID, 0, mainBaseID);
+				aiPlanSetVariableVector(gHealerPlan, cCombatPlanTargetPoint, 0, gatherPoint);
+				aiPlanSetVariableVector(gHealerPlan, cCombatPlanGatherPoint, 0, gatherPoint);
+				aiPlanSetVariableFloat(gHealerPlan, cCombatPlanTargetEngageRange, 0,
+					cvDefenseReflexRadiusActive);
+				aiPlanSetVariableFloat(gHealerPlan, cCombatPlanGatherDistance, 0, 10.0);
+				aiPlanSetVariableInt(gHealerPlan, cCombatPlanRefreshFrequency, 0, 1000);
+				aiPlanSetBaseID(gHealerPlan, mainBaseID);
+				aiPlanSetInitialPosition(gHealerPlan, homePosition);
+				aiPlanSetUnitStance(gHealerPlan, cUnitStanceDefensive);
+				aiPlanAddUnitType(gHealerPlan, cUnitTypedeAbun, numAbuns, numAbuns, numAbuns);
+				aiPlanSetDesiredPriority(gHealerPlan, 99);
+				if (aiPlanSetActive(gHealerPlan) == false)
+				{
+					debugEvent("MIL-INVARIANT", "failed to activate Abun emergency plan id=" + gHealerPlan);
+					aiPlanDestroy(gHealerPlan);
+					gHealerPlan = -1;
+					break;
+				}
+				debugEvent("MIL-HEALER", "created Abun cPlanCombat/Defend id=" + gHealerPlan +
+					" base=" + mainBaseID + " abuns=" + numAbuns);
 			}
 			else
-				aiPlanAddUnitType(abunDefendPlan, cUnitTypedeAbun, numAbuns, numAbuns, numAbuns);
+			{
+				aiPlanSetVariableInt(gHealerPlan, cCombatPlanTargetBaseID, 0, mainBaseID);
+				aiPlanSetVariableVector(gHealerPlan, cCombatPlanTargetPoint, 0, gatherPoint);
+				aiPlanSetVariableVector(gHealerPlan, cCombatPlanGatherPoint, 0, gatherPoint);
+				aiPlanAddUnitType(gHealerPlan, cUnitTypedeAbun, numAbuns, numAbuns, numAbuns);
+			}
 
 			break;
 		}
@@ -2879,19 +4894,6 @@ minInterval 60
 		}
 	}
 
-	if (numHerdables > 0)
-	{
-		int upgradePlanID = -1;
-
-		// Get XP upgrade
-		if (kbTechGetStatus(cTechypLivestockHoliness) == cTechStatusObtainable)
-		{
-			if (aiPlanGetIDByTypeAndVariableType(cPlanResearch, cResearchPlanTechID, cTechypLivestockHoliness) >= 0)
-				return;
-			createSimpleResearchPlan(cTechypLivestockHoliness, getUnit(cUnitTypeypSacredField), cMilitaryEscrowID, 50);
-			return;
-		}
-	}
 }
 
 //==============================================================================

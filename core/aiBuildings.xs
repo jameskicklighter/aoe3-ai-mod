@@ -12,15 +12,390 @@
 //
 // Called when a build plan cannot fails to find a location to build.
 //==============================================================================
+bool isBuildTraceType(int puid = -1)
+{
+	return (puid == gDockUnit || puid == cUnitTypedeTorp || puid == cUnitTypedeTorpGeneric);
+}
+
+
+int getTorpPlanTargetMineID(int planID = -1)
+{
+	if ((planID < 0) ||
+		(aiPlanGetNumberUserVariableValues(planID, cBuildPlanTorpTargetMineID) < 1))
+	{
+		return (-1);
+	}
+	return (aiPlanGetUserVariableInt(planID, cBuildPlanTorpTargetMineID, 0));
+}
+
+
+bool isTorpPositionAvoided(vector position = cInvalidVector)
+{
+	if ((position == cInvalidVector) || (gTorpPositionsToAvoid < 0))
+		return (false);
+
+	int positionCount = xsArrayGetSize(gTorpPositionsToAvoid);
+	for (int positionIndex = 1; positionIndex < positionCount; positionIndex++)
+	{
+		if (xsArrayGetVector(gTorpPositionsToAvoid, positionIndex) == position)
+			return (true);
+	}
+	return (false);
+}
+
+
+bool addTorpPositionToAvoid(int planID = -1, int mineID = -1,
+	vector position = cInvalidVector)
+{
+	if ((gTorpPositionsToAvoid < 0) || (position == cInvalidVector) ||
+		(isTorpPositionAvoided(position) == true))
+	{
+		return (false);
+	}
+
+	int oldSize = xsArrayGetSize(gTorpPositionsToAvoid);
+	xsArrayResizeVector(gTorpPositionsToAvoid, oldSize + 1);
+	xsArraySetVector(gTorpPositionsToAvoid, oldSize, position);
+	debugEvent("BUILD-TRACE", "phase=torp-avoid-add plan=" + planID + " mine=" + mineID +
+		" pos=" + position + " size=" + (oldSize + 1));
+	return (true);
+}
+
+
+void recordUnambiguousFailedTorpPosition(int puid = -1)
+{
+	if ((cMyCiv != cCivDESwedish) || (puid != cUnitTypedeTorp) ||
+		(gTorpPositionsToAvoid < 0))
+	{
+		return;
+	}
+
+	int candidateCount = 0;
+	int candidatePlanID = -1;
+	int candidateMineID = -1;
+	int candidateAssignedUnits = 0;
+	int assignedPlanCount = 0;
+	int planAssignedUnits = 0;
+	vector candidatePosition = cInvalidVector;
+	int activeCount = aiPlanGetActiveCount();
+	for (int activeIndex = 0; activeIndex < activeCount; activeIndex++)
+	{
+		int planID = aiPlanGetIDByActiveIndex(activeIndex);
+		if ((planID < 0) || (aiPlanGetType(planID) != cPlanBuild) ||
+			(aiPlanGetVariableInt(planID, cBuildPlanBuildingTypeID, 0) != puid))
+		{
+			continue;
+		}
+
+		candidateCount++;
+		planAssignedUnits = aiPlanGetNumberUnits(planID, cUnitTypeUnit, true);
+		if (planAssignedUnits > 0)
+			assignedPlanCount++;
+		int mineID = getTorpPlanTargetMineID(planID);
+		vector intendedPosition = aiPlanGetVariableVector(planID, cBuildPlanCenterPosition, 0);
+		if (candidateCount == 1)
+		{
+			candidatePlanID = planID;
+			candidateMineID = mineID;
+			candidateAssignedUnits = planAssignedUnits;
+			candidatePosition = intendedPosition;
+		}
+	}
+
+	if ((candidateCount == 1) && (candidateMineID >= 0) &&
+		(candidateAssignedUnits > 0) && (candidatePosition != cInvalidVector))
+	{
+		addTorpPositionToAvoid(candidatePlanID, candidateMineID, candidatePosition);
+		return;
+	}
+	debugEvent("BUILD-TRACE", "phase=torp-avoid-skip candidates=" + candidateCount +
+		" assignedPlans=" + assignedPlanCount);
+}
+
+
+int countActiveTorpPlansForMine(int mineID = -1, int excludedPlanID = -1)
+{
+	if (mineID < 0)
+	{
+		return (0);
+	}
+	int count = 0;
+	int activeCount = aiPlanGetActiveCount();
+	for (int activeIndex = 0; activeIndex < activeCount; activeIndex++)
+	{
+		int planID = aiPlanGetIDByActiveIndex(activeIndex);
+		if (planID < 0 || planID == excludedPlanID || aiPlanGetType(planID) != cPlanBuild)
+		{
+			continue;
+		}
+		int puid = aiPlanGetVariableInt(planID, cBuildPlanBuildingTypeID, 0);
+		if (puid != cUnitTypedeTorp && puid != cUnitTypedeTorpGeneric)
+		{
+			continue;
+		}
+		if (getTorpPlanTargetMineID(planID) == mineID)
+		{
+			count++;
+		}
+	}
+	return (count);
+}
+
+
+void traceBuildPlanSnapshot(int planID = -1, string phase = "snapshot")
+{
+	int planState = aiPlanGetState(planID);
+	if (planState < 0)
+	{
+		debugEvent("BUILD-TRACE", "phase=" + phase + " id=" + planID + " state=" + planState +
+			" terminal=1");
+		return;
+	}
+
+	int puid = aiPlanGetVariableInt(planID, cBuildPlanBuildingTypeID, 0);
+	if (isBuildTraceType(puid) == false)
+	{
+		return;
+	}
+	int requestedBuilderType = -1;
+	if (aiPlanGetNumberUserVariableValues(planID, cBuildPlanBuilderTypeID) > 0)
+	{
+		requestedBuilderType = aiPlanGetUserVariableInt(planID, cBuildPlanBuilderTypeID, 0);
+	}
+	int targetMineID = -1;
+	targetMineID = getTorpPlanTargetMineID(planID);
+	int actualUnitCount = aiPlanGetNumberUnits(planID, cUnitTypeUnit, true);
+	int firstBuilderID = -1;
+	if (actualUnitCount > 0)
+	{
+		firstBuilderID = aiPlanGetUnitByIndex(planID, 0);
+	}
+	int foundationID = -1;
+	if (aiPlanGetNumberVariableValues(planID, cBuildPlanFoundationID) > 0)
+	{
+		foundationID = aiPlanGetVariableInt(planID, cBuildPlanFoundationID, 0);
+	}
+
+	debugEvent("BUILD-TRACE", "phase=" + phase + " id=" + planID + " puid=" + puid +
+		" state=" + planState + " placement=" +
+		aiPlanGetVariableInt(planID, cBuildPlanBuildingPlacementID, 0) + " foundation=" + foundationID +
+		" buildUnit=" +
+		aiPlanGetVariableInt(planID, cBuildPlanBuildUnitID, 0));
+	debugEvent("BUILD-TRACE", "phase=plan id=" + planID + " center=" +
+		aiPlanGetVariableVector(planID, cBuildPlanCenterPosition, 0) + " requestedBuilder=" +
+		requestedBuilderType + " units=" + actualUnitCount + " mine=" + targetMineID +
+		" retries=" + aiPlanGetVariableInt(planID, cBuildPlanRetries, 0) + "/" +
+		aiPlanGetVariableInt(planID, cBuildPlanMaxRetries, 0));
+
+	if (puid == gDockUnit)
+	{
+		vector dockPoint0 = cInvalidVector;
+		vector dockPoint1 = cInvalidVector;
+		int dockPointCount = aiPlanGetNumberVariableValues(planID, cBuildPlanDockPlacementPoint);
+		if (dockPointCount > 0)
+		{
+			dockPoint0 = aiPlanGetVariableVector(planID, cBuildPlanDockPlacementPoint, 0);
+		}
+		if (dockPointCount > 1)
+		{
+			dockPoint1 = aiPlanGetVariableVector(planID, cBuildPlanDockPlacementPoint, 1);
+		}
+		debugEvent("BUILD-TRACE", "phase=dock-points id=" + planID + " p0=" + dockPoint0 +
+			" p1=" + dockPoint1 + " pending=" +
+			aiPlanGetVariableInt(planID, cBuildPlanPendingCommands, 0) + " failure=" +
+			aiPlanGetVariableInt(planID, cBuildPlanFailureCause, 0));
+	}
+	else
+	{
+		debugEvent("BUILD-TRACE", "phase=torp-target id=" + planID + " mine=" + targetMineID +
+			" duplicateActive=" + countActiveTorpPlansForMine(targetMineID, planID) +
+			" intended=" + aiPlanGetVariableVector(planID, cBuildPlanCenterPosition, 0) +
+			" globalIntended=" + gTorpBuildPlanPosition);
+	}
+
+	if (firstBuilderID >= 0)
+	{
+		debugEvent("BUILD-TRACE", "phase=builder id=" + planID + " unit=" + firstBuilderID +
+			" owner=" + kbUnitGetPlayerID(firstBuilderID) + " unitPlan=" +
+			kbUnitGetPlanID(firstBuilderID) + " action=" + kbUnitGetActionType(firstBuilderID) +
+			" target=" + kbUnitGetTargetUnitID(firstBuilderID) + " pos=" +
+			kbUnitGetPosition(firstBuilderID));
+	}
+}
+
+
+void buildPlacementTraceHandler(int planID = -1)
+{
+	if (gBetterAIDebug < 1)
+		return;
+	if (aiPlanGetState(planID) < 0)
+	{
+		debugEvent("BUILD-TRACE", "phase=terminate id=" + planID + " state=" + aiPlanGetState(planID));
+		return;
+	}
+	xsEnableRule("buildPlacementTraceMonitor");
+	traceBuildPlanSnapshot(planID, "state-change");
+}
+
+
+void traceBuildPlanCreated(int planID = -1, int puid = -1)
+{
+	if (gBetterAIDebug < 1)
+		return;
+	if (planID < 0 || isBuildTraceType(puid) == false)
+	{
+		return;
+	}
+	int targetMineID = getTorpPlanTargetMineID(planID);
+	aiPlanSetEventHandler(planID, cPlanEventStateChange, "buildPlacementTraceHandler");
+	debugEvent("BUILD-TRACE", "phase=create id=" + planID + " puid=" + puid + " mine=" +
+		targetMineID + " duplicateActive=" + countActiveTorpPlansForMine(targetMineID, planID));
+	traceBuildPlanSnapshot(planID, "create");
+	xsEnableRule("buildPlacementTraceMonitor");
+}
+
+
+void traceExplicitBuildWagon(int planID = -1, int buildingType = -1, int wagonID = -1)
+{
+	if (gBetterAIDebug < 1)
+		return;
+	if (planID < 0 || wagonID < 0 || isBuildTraceType(buildingType) == false)
+	{
+		return;
+	}
+	int targetMineID = -1;
+	int assignedUnitCount = aiPlanGetNumberUnits(planID, cUnitTypeUnit, true);
+	int unitOwnerID = kbUnitGetPlayerID(wagonID);
+	int unitPlanID = kbUnitGetPlanID(wagonID);
+	bool assignmentSucceeded =
+		(assignedUnitCount > 0) &&
+		(unitOwnerID == cMyID) &&
+		(kbUnitIsType(wagonID, cUnitTypeAbstractWagon) == true) &&
+		(unitPlanID == planID);
+	targetMineID = getTorpPlanTargetMineID(planID);
+	if (buildingType == cUnitTypedeTorp || buildingType == cUnitTypedeTorpGeneric)
+	{
+		gBuildTraceTorpWagonUntilTime = xsGetTime() + 120000;
+	}
+	if (assignmentSucceeded == false)
+	{
+		debugEvent("BUILD-TRACE", "phase=wagon-assignment-failed unit=" + wagonID +
+			" plan=" + planID + " puid=" + buildingType + " owner=" + unitOwnerID +
+			" unitPlan=" + unitPlanID + " units=" + assignedUnitCount + " mine=" +
+			targetMineID);
+		traceBuildPlanSnapshot(planID, "wagon-assignment-failed");
+		return;
+	}
+	debugEvent("BUILD-TRACE", "phase=wagon-assigned unit=" + wagonID + " plan=" + planID +
+		" puid=" + buildingType + " mine=" + targetMineID + " intended=" +
+		aiPlanGetVariableVector(planID, cBuildPlanCenterPosition, 0) + " duplicateActive=" +
+		countActiveTorpPlansForMine(targetMineID, planID));
+	traceBuildPlanSnapshot(planID, "wagon-assigned");
+}
+
+
+void traceBuildPlacementFailure(int baseID = -1, int puid = -1)
+{
+	if (gBetterAIDebug < 1)
+		return;
+	if (isBuildTraceType(puid) == false)
+	{
+		return;
+	}
+	int avoidSize = -1;
+	if (gTorpPositionsToAvoid >= 0)
+	{
+		avoidSize = xsArrayGetSize(gTorpPositionsToAvoid);
+	}
+	debugEvent("BUILD-TRACE", "phase=placement-fail callbackPuid=" + puid + " base=" + baseID +
+		" avoidSize=" + avoidSize);
+
+	int activeCount = aiPlanGetActiveCount();
+	int candidates = 0;
+	for (int activeIndex = 0; activeIndex < activeCount; activeIndex++)
+	{
+		int planID = aiPlanGetIDByActiveIndex(activeIndex);
+		if (planID < 0 || aiPlanGetType(planID) != cPlanBuild ||
+			aiPlanGetVariableInt(planID, cBuildPlanBuildingTypeID, 0) != puid)
+		{
+			continue;
+		}
+		candidates++;
+		if (candidates <= 3)
+		{
+			traceBuildPlanSnapshot(planID, "failure-candidate");
+		}
+	}
+	debugEvent("BUILD-TRACE", "phase=placement-fail-summary puid=" + puid +
+		" activeCandidates=" + candidates);
+}
+
+
+rule buildPlacementTraceMonitor
+inactive
+minInterval 15
+{
+	if (gBetterAIDebug < 1)
+	{
+		xsDisableSelf();
+		return;
+	}
+	int activeCount = aiPlanGetActiveCount();
+	bool tracedActivePlan = false;
+	bool activeTorpPlan = false;
+	for (int activeIndex = 0; activeIndex < activeCount; activeIndex++)
+	{
+		int planID = aiPlanGetIDByActiveIndex(activeIndex);
+		if (planID < 0 || aiPlanGetType(planID) != cPlanBuild)
+		{
+			continue;
+		}
+		int puid = aiPlanGetVariableInt(planID, cBuildPlanBuildingTypeID, 0);
+		if (isBuildTraceType(puid) == false)
+		{
+			continue;
+		}
+		tracedActivePlan = true;
+		if (puid == cUnitTypedeTorp || puid == cUnitTypedeTorpGeneric)
+		{
+			activeTorpPlan = true;
+		}
+		traceBuildPlanSnapshot(planID, "heartbeat");
+	}
+
+	if (activeTorpPlan == true)
+	{
+		gBuildTraceTorpWagonUntilTime = xsGetTime() + 120000;
+	}
+	if (xsGetTime() <= gBuildTraceTorpWagonUntilTime)
+	{
+		int wagonQuery = createSimpleUnitQuery(cUnitTypedeTorpWagon, cMyID, cUnitStateAlive);
+		int wagonCount = kbUnitQueryExecute(wagonQuery);
+		for (int wagonIndex = 0; wagonIndex < wagonCount; wagonIndex++)
+		{
+			int wagonID = kbUnitQueryGetResult(wagonQuery, wagonIndex);
+			debugEvent("BUILD-TRACE", "phase=torp-wagon-follow unit=" + wagonID + " plan=" +
+				kbUnitGetPlanID(wagonID) + " action=" + kbUnitGetActionType(wagonID) +
+				" target=" + kbUnitGetTargetUnitID(wagonID) + " pos=" + kbUnitGetPosition(wagonID));
+		}
+	}
+	else if (tracedActivePlan == false)
+	{
+		xsDisableSelf();
+	}
+}
+
+
 void buildingPlacementFailedHandler(int baseID = -1, int puid = -1)
 {
+	traceBuildPlacementFailure(baseID, puid);
 	if (puid == gDockUnit)
 		return;
 	if (puid == cUnitTypedeTorp && cMyCiv == cCivDESwedish)
 	{
-		int last = xsArrayGetSize(gTorpPositionsToAvoid);
-		xsArrayResizeVector(gTorpPositionsToAvoid, last + 1);
-		xsArraySetVector(gTorpPositionsToAvoid, last - 1, gTorpPosition);
+		// This callback has no plan ID and may arrive after the failed plan has
+		// left the active list. Keep it observational so a concurrent successful
+		// Torp plan cannot be mistaken for the failure and blacklisted.
 		return;
 	}
 
@@ -136,6 +511,21 @@ minInterval 5
 	int buildLimit = kbGetBuildLimit(cMyID, gHouseUnit);
 	int planID = -1;
 	int popRoom = kbGetPopCap() - kbGetPop();
+
+	// Four Villages cannot provide China's full population capacity without
+	// their sequential population upgrades. Research those before either
+	// stopping at the Village build limit or spending on a fifth Village.
+	if ((cMyCiv == cCivChinese) && (numHouses >= 4))
+	{
+		if (researchSimpleTech(cTechypVillagePopCapIncrease, cUnitTypeypVillage, -1, 65) == false)
+			return;
+		if (researchSimpleTech(cTechypVillagePopCapIncrease2, cUnitTypeypVillage, -1, 65) == false)
+			return;
+		if (researchSimpleTech(cTechypVillagePopCapIncrease3, cUnitTypeypVillage, -1, 65) == false)
+			return;
+		if (researchSimpleTech(cTechypVillagePopCapIncrease4, cUnitTypeypVillage, -1, 65) == false)
+			return;
+	}
 
 	if (numHouses >= buildLimit)
 	{
@@ -807,6 +1197,8 @@ bool shouldBuildTorp(vector position = cInvalidVector, float radius = 80.0)
 		mineAreaGroup = kbAreaGroupGetIDByPosition(location);
 		amount = kbUnitGetResourceAmount(mineID, cResourceGold);
 
+		if (isTorpPositionAvoided(location))
+			continue;
 		if (mineAreaGroup != kbAreaGroupGetIDByPosition(position))
 			continue;
 		if (resourceCloserToAlly(mineID))
@@ -823,17 +1215,27 @@ bool shouldBuildTorp(vector position = cInvalidVector, float radius = 80.0)
 			(getUnitCountByLocation(cUnitTypeLogicalTypeLandMilitary, cPlayerRelationEnemy, cUnitStateAlive, location, 45.0) <= 2 ||
 			getDistance(location, gHomeBase) < 45.0))
 		{
+			gTorpBuildPlanTargetMineID = mineID;
 			gTorpBuildPlanPosition = location;
 			return(true);
 		}
 	}
 
+	gTorpBuildPlanTargetMineID = -1;
 	gTorpBuildPlanPosition = cInvalidVector;
 	return(false);
 }
 
 void selectTorpBuildPlanPosition(int planID = -1)
 {
+	if (aiPlanGetNumberUserVariableValues(planID, cBuildPlanTorpTargetMineID) < 1)
+	{
+		aiPlanAddUserVariableInt(planID, cBuildPlanTorpTargetMineID,
+			"Torp Target Mine", 1);
+	}
+	aiPlanSetUserVariableInt(planID, cBuildPlanTorpTargetMineID, 0,
+		gTorpBuildPlanTargetMineID);
+
 	if (gTorpBuildPlanPosition != cInvalidVector)
 	{
 		aiPlanSetVariableVector(planID, cBuildPlanCenterPosition, 0, gTorpBuildPlanPosition);
@@ -1018,6 +1420,24 @@ void selectUniversityBuildPlanPosition(int planID = -1, vector position = cInval
 }
 
 // ================================================================================
+//	isValidIdleBuildWagon
+// ================================================================================
+bool isValidIdleBuildWagon(int wagonID = -1)
+{
+	if (wagonID < 0)
+		return (false);
+	if ((kbUnitGetPlayerID(wagonID) != cMyID) ||
+		(kbUnitIsType(wagonID, cUnitTypeAbstractWagon) == false) ||
+		(kbUnitGetCurrentHitpoints(wagonID) <= 0.0) ||
+		(kbUnitGetPlanID(wagonID) >= 0))
+	{
+		return (false);
+	}
+	return (true);
+}
+
+
+// ================================================================================
 //	findWagonToBuild
 // ================================================================================
 int findWagonToBuild(int puid = -1)
@@ -1089,13 +1509,25 @@ minInterval 20
 	int i = 0;
 	int j = 0;
 	int wagonType = -1;
-	int wagonQueryID = createSimpleUnitQuery(cUnitTypeAbstractWagon, cMyID, cUnitStateAlive);
-	int numberFound = kbUnitQueryExecute(wagonQueryID);
+	static int wagonMonitorQueryID = -1;
+	int numberFound = 0;
 	int wagon = -1;
 	int buildingType = -1;
 	int buildLimit = -1;
 	int buildingCount = -1;
 	static int kingdomBuilderSpecialBuilding = -1;
+
+	if (wagonMonitorQueryID < 0)
+		wagonMonitorQueryID = kbUnitQueryCreate("wagonMonitor Unit Query");
+	if (wagonMonitorQueryID < 0)
+		return;
+	kbUnitQueryResetResults(wagonMonitorQueryID);
+	kbUnitQuerySetPlayerID(wagonMonitorQueryID, cMyID);
+	kbUnitQuerySetUnitType(wagonMonitorQueryID, cUnitTypeAbstractWagon);
+	kbUnitQuerySetState(wagonMonitorQueryID, cUnitStateAlive);
+	kbUnitQuerySetIgnoreKnockedOutUnits(wagonMonitorQueryID, true);
+	numberFound = kbUnitQueryExecute(wagonMonitorQueryID);
+
 	if (civIsAfrican() && kingdomBuilderSpecialBuilding < 0)
 	{
 		if (cMyCiv == cCivDEEthiopians)
@@ -1125,8 +1557,8 @@ minInterval 20
 		{
 			for (j = 0; < numberFound)
 			{
-				wagon = kbUnitQueryGetResult(wagonQueryID, j);
-				if (kbUnitGetPlanID(wagon) >= 0)
+				wagon = kbUnitQueryGetResult(wagonMonitorQueryID, j);
+				if (isValidIdleBuildWagon(wagon) == false)
 				{
 					continue;
 				}
@@ -1157,8 +1589,9 @@ minInterval 20
 	
 	for (i = 0; < numberFound)
 	{
-		wagon = kbUnitQueryGetResult(wagonQueryID, i);
-		if (kbUnitGetPlanID(wagon) >= 0)
+		wagon = kbUnitQueryGetResult(wagonMonitorQueryID, i);
+		buildingType = -1;
+		if (isValidIdleBuildWagon(wagon) == false)
 			continue;
 		wagonType = kbUnitGetProtoUnitID(wagon);
 		
@@ -1229,10 +1662,13 @@ minInterval 20
 			
 			if (buildingType != -1)
 			{
+				if (isValidIdleBuildWagon(wagon) == false)
+					continue;
 				// Make the actual Build Plan and go to next iteration.
 				planID = createBuildPlan(buildingType, 1, 75, gHomeBase, 1, wagonType);
 				// aiPlanAddUnitType(planID, wagonType, 1, 1, 1);
 				aiPlanAddUnit(planID, wagon);
+				traceExplicitBuildWagon(planID, buildingType, wagon);
 				debugBuildings("FAILSAFE: Added an idle " + kbGetProtoUnitName(cUnitTypedeImperialWagon) + " with ID: " + wagon + " to a new Build Plan ID: " + planID);
 				continue;
 			}
@@ -1838,8 +2274,11 @@ minInterval 20
 				continue; // We can't make this building anymore so go to the next iteration.
 			}
 		}
+		if (isValidIdleBuildWagon(wagon) == false)
+			continue;
 		planID = createBuildPlan(buildingType, 1, 99, gHomeBase, 1, wagonType);
 		aiPlanAddUnit(planID, wagon);
+		traceExplicitBuildWagon(planID, buildingType, wagon);
 	}
 }
 
@@ -1976,65 +2415,6 @@ minInterval 5
 		planID = createBuildPlan(gMarketUnit, 1, 96, gHomeBase); // Just higher than house
 		aiPlanSetDesiredResourcePriority(planID, 60);
 		debugBuildings("Starting a new Market build plan.");
-	}
-
-	// Trading Posts (Trade Route).
-	// Easy and Standard Difficulties wait until Age 4 before building TPs.
-	if (cDifficultyCurrent >= cDifficultyModerate || kbGetAge() >= cAge4)
-	{	// If we are in Age 2 with a non-treaty strategy, only consider building a TP
-		// if we have >= 500 wood.
-		if (gMyStrategy == cStrategyTreaty ||
-			kbGetAge() >= cAge3 ||
-			kbResourceGet(cResourceWood) >= 500)
-		{
-			float radius = -1.0;
-			if (aiTreatyActive() == true)
-				radius = 85.0;
-
-			int socketID = -1;
-			int socketQuery = createSimpleUnitQuery(cUnitTypeSocketTradeRoute, 0, cUnitStateAlive, gHomeBase, radius);
-			kbUnitQuerySetAscendingSort(socketQuery, true);
-			int numberFound = kbUnitQueryExecute(socketQuery);
-			numBuildings = 0;
-
-			for (i = 0; < numberFound)
-			{
-				socketID = kbUnitQueryGetResult(socketQuery, i);
-
-				if (kbUnitGetProtoUnitID(socketID) == cUnitTypedeSPCSocketCityState)
-					continue;
-
-				// Ignore this location if there are threatening enemy buildings nearby.
-				if (getUnitByLocation(cUnitTypeAbstractCallMinutemen, cPlayerRelationEnemy, cUnitStateABQ, kbUnitGetPosition(socketID), 50.0) >= 0)
-					continue;
-
-				// Already claimed.
-				if (getUnitByLocation(cUnitTypeTradingPost, cPlayerRelationAny, cUnitStateABQ, kbUnitGetPosition(socketID), 10.0) >= 0)
-				{
-					if (getUnitByLocation(cUnitTypeTradingPost, cMyID, cUnitStateABQ, kbUnitGetPosition(socketID), 10.0) >= 0)
-						numBuildings++;
-					continue;
-				}
-
-				break;
-			}
-
-			numWanted = numberFound / (getAllyCount() + 1);
-			if (numWanted == 0)
-				numWanted++;
-			if (numBuildings < numWanted)
-			{
-				planID = aiPlanGetIDByTypeAndVariableType(cPlanBuild, cBuildPlanBuildingTypeID, cUnitTypeTradingPost);
-				if (planID < 0 && socketID >= 0)
-				{
-					if (aiGetFallenExplorerID() < 0)
-						buildTradingPost(socketID, 60, cUnitTypeHero, 1);
-					else if (kbGetAge() >= cAge3)
-						buildTradingPost(socketID, 60, gEconUnit, 2);
-				}
-				debugBuildings("Starting a new Trading Post (Trade Route) build plan.");
-			}
-		}
 	}
 
 	// Banks for Dutch.
@@ -2224,58 +2604,6 @@ minInterval 5
 		return;
 
 	// ****************************************************************************************************
-
-	// Trading Posts (Natives).
-	if (cDifficultyCurrent >= cDifficultyModerate || kbGetAge() >= cAge4)
-	{	// Sandbox and Easy Difficulties wait until Age 4 before building TPs.
-		float radius2 = -1.0;
-		if (aiTreatyActive() == true)
-			radius2 = 85.0;
-
-		int socketID2 = -1;
-		int socketQuery2 = createSimpleUnitQuery(cUnitTypeNativeSocket, 0, cUnitStateAlive, gHomeBase, radius2);
-		kbUnitQuerySetAscendingSort(socketQuery2, true);
-		int numberFound2 = kbUnitQueryExecute(socketQuery2);
-		numBuildings = 0;
-
-		for (i = 0; < numberFound2)
-		{
-			socketID2 = kbUnitQueryGetResult(socketQuery2, i);
-
-			if (kbUnitGetProtoUnitID(socketID2) == cUnitTypedeSPCSocketCityState)
-				continue;
-
-			// Ignore this location if there are threatening enemy buildings nearby.
-			if (getUnitByLocation(cUnitTypeAbstractCallMinutemen, cPlayerRelationEnemy, cUnitStateABQ, kbUnitGetPosition(socketID2), 50.0) >= 0)
-				continue;
-
-			// Already claimed.
-			if (getUnitByLocation(cUnitTypeTradingPost, cPlayerRelationAny, cUnitStateABQ, kbUnitGetPosition(socketID2), 10.0) >= 0)
-			{
-				if (getUnitByLocation(cUnitTypeTradingPost, cMyID, cUnitStateABQ, kbUnitGetPosition(socketID2), 10.0) >= 0)
-					numBuildings++;
-				continue;
-			}
-
-			break;
-		}
-
-		numWanted = numberFound2 / (getAllyCount() + 1);
-		if (numWanted == 0)
-			numWanted++;
-		if (numBuildings < numWanted)
-		{
-			planID = aiPlanGetIDByTypeAndVariableType(cPlanBuild, cBuildPlanBuildingTypeID, cUnitTypeTradingPost);
-			if (planID < 0 && socketID2 >= 0)
-			{
-				if (aiGetFallenExplorerID() < 0)
-					buildTradingPost(socketID2, 50, cUnitTypeHero, 1);
-				else
-					buildTradingPost(socketID2, 50, gEconUnit, 2);
-			}
-			debugBuildings("Starting a new Trading Post (Native Socket) build plan.");
-		}
-	}
 
 	// Arsenal.
 	if (civIsEuropean() == true)
@@ -2508,6 +2836,818 @@ minInterval 5
 			createBuildPlan(cUnitTypeCapitol, 1, 60, gHomeBase);
 			debugBuildings("Starting a new Capitol build plan.");
 		}
+	}
+}
+
+//==============================================================================
+// findTradingPostBuilder
+//
+// Return a compatible builder that can reach the socket by land. Dedicated
+// wagons and heroes must be genuinely idle; villagers may be reassigned from
+// Better AI's direct economic tasks as long as no plan already owns them.
+//==============================================================================
+int findTradingPostBuilder(vector socketPosition = cInvalidVector)
+{
+	if (socketPosition == cInvalidVector)
+		return (-1);
+
+	int socketAreaGroup = kbAreaGroupGetIDByPosition(socketPosition);
+	if (socketAreaGroup < 0)
+		return (-1);
+
+	int numberFound = 0;
+	int builderID = -1;
+	int builderPUID = -1;
+	int builderAreaGroup = -1;
+	int index = 0;
+	static int wagonQuery = -1;
+	static int heroQuery = -1;
+	static int villagerQuery = -1;
+
+	if (wagonQuery < 0)
+		wagonQuery = kbUnitQueryCreate("Better AI idle TP wagon query");
+	kbUnitQueryResetResults(wagonQuery);
+	kbUnitQuerySetPlayerID(wagonQuery, cMyID);
+	kbUnitQuerySetUnitType(wagonQuery, cUnitTypeAbstractWagon);
+	kbUnitQuerySetState(wagonQuery, cUnitStateAlive);
+	kbUnitQuerySetPosition(wagonQuery, socketPosition);
+	kbUnitQuerySetAscendingSort(wagonQuery, true);
+	numberFound = kbUnitQueryExecute(wagonQuery);
+
+	for (index = 0; < numberFound)
+	{
+		builderID = kbUnitQueryGetResult(wagonQuery, index);
+		builderPUID = kbUnitGetProtoUnitID(builderID);
+		if ((kbUnitGetPlanID(builderID) >= 0) ||
+			(kbUnitGetActionType(builderID) != cActionTypeIdle) ||
+			(kbProtoUnitCanTrain(builderPUID, cUnitTypeTradingPost) == false))
+		{
+			continue;
+		}
+
+		builderAreaGroup = kbAreaGroupGetIDByPosition(kbUnitGetPosition(builderID));
+		if ((builderAreaGroup >= 0) &&
+			(kbAreAreaGroupsPassableByLand(builderAreaGroup, socketAreaGroup) == true))
+		{
+			return (builderID);
+		}
+	}
+
+	if (heroQuery < 0)
+		heroQuery = kbUnitQueryCreate("Better AI idle TP hero query");
+	kbUnitQueryResetResults(heroQuery);
+	kbUnitQuerySetPlayerID(heroQuery, cMyID);
+	kbUnitQuerySetUnitType(heroQuery, cUnitTypeHero);
+	kbUnitQuerySetState(heroQuery, cUnitStateAlive);
+	kbUnitQuerySetPosition(heroQuery, socketPosition);
+	kbUnitQuerySetAscendingSort(heroQuery, true);
+	numberFound = kbUnitQueryExecute(heroQuery);
+
+	for (index = 0; < numberFound)
+	{
+		builderID = kbUnitQueryGetResult(heroQuery, index);
+		builderPUID = kbUnitGetProtoUnitID(builderID);
+		if ((kbUnitGetPlanID(builderID) >= 0) ||
+			(kbUnitGetActionType(builderID) != cActionTypeIdle) ||
+			(kbProtoUnitCanTrain(builderPUID, cUnitTypeTradingPost) == false))
+		{
+			continue;
+		}
+
+		builderAreaGroup = kbAreaGroupGetIDByPosition(kbUnitGetPosition(builderID));
+		if ((builderAreaGroup >= 0) &&
+			(kbAreAreaGroupsPassableByLand(builderAreaGroup, socketAreaGroup) == true))
+		{
+			return (builderID);
+		}
+	}
+
+	// Most military revolutions no longer have a usable economic builder.
+	if (((gRevolutionType & cRevolutionMilitary) != 0) &&
+		((gRevolutionType & cRevolutionFinland) != cRevolutionFinland))
+	{
+		return (-1);
+	}
+
+	if (villagerQuery < 0)
+		villagerQuery = kbUnitQueryCreate("Better AI reachable TP villager query");
+	kbUnitQueryResetResults(villagerQuery);
+	kbUnitQuerySetPlayerID(villagerQuery, cMyID);
+	kbUnitQuerySetUnitType(villagerQuery, gEconUnit);
+	kbUnitQuerySetState(villagerQuery, cUnitStateAlive);
+	kbUnitQuerySetPosition(villagerQuery, socketPosition);
+	kbUnitQuerySetAscendingSort(villagerQuery, true);
+	numberFound = kbUnitQueryExecute(villagerQuery);
+
+	for (index = 0; < numberFound)
+	{
+		builderID = kbUnitQueryGetResult(villagerQuery, index);
+		builderPUID = kbUnitGetProtoUnitID(builderID);
+		if ((kbUnitGetPlanID(builderID) >= 0) ||
+			(kbProtoUnitCanTrain(builderPUID, cUnitTypeTradingPost) == false))
+		{
+			continue;
+		}
+
+		builderAreaGroup = kbAreaGroupGetIDByPosition(kbUnitGetPosition(builderID));
+		if ((builderAreaGroup >= 0) &&
+			(kbAreAreaGroupsPassableByLand(builderAreaGroup, socketAreaGroup) == true))
+		{
+			return (builderID);
+		}
+	}
+
+	return (-1);
+}
+
+
+int getNativeSocketOwnershipClass(int socketID = -1, int occupyingTradingPostID = -1)
+{
+	if (occupyingTradingPostID >= 0)
+	{
+		return (cNativeSocketOwnershipHardOccupied);
+	}
+	int ownerID = kbUnitGetPlayerID(socketID);
+	if (ownerID == cMyID)
+	{
+		return (cNativeSocketOwnershipSelf);
+	}
+	if (ownerID <= 0)
+	{
+		return (cNativeSocketOwnershipNeutral);
+	}
+	if (kbIsPlayerAlly(ownerID) == true)
+	{
+		return (cNativeSocketOwnershipAlly);
+	}
+	return (cNativeSocketOwnershipEnemy);
+}
+
+
+float getTradingPostSocketDanger(int enemyQuery = -1, vector socketPosition = cInvalidVector)
+{
+	if (enemyQuery < 0 || socketPosition == cInvalidVector)
+	{
+		return (999.0);
+	}
+	kbUnitQuerySetPosition(enemyQuery, socketPosition);
+	kbUnitQueryResetResults(enemyQuery);
+	int numberEnemiesFound = kbUnitQueryExecute(enemyQuery);
+	float militaryPower = 0.0;
+	for (int enemyIndex = 0; enemyIndex < numberEnemiesFound; enemyIndex++)
+	{
+		int enemyID = kbUnitQueryGetResult(enemyQuery, enemyIndex);
+		int enemyPUID = kbUnitGetProtoUnitID(enemyID);
+		switch (enemyPUID)
+		{
+			case cUnitTypeFortFrontier:
+			{
+				militaryPower += 10.0;
+				break;
+			}
+			case cUnitTypeTownCenter:
+			case cUnitTypeNoblesHut:
+			case cUnitTypeWarHut:
+			case cUnitTypeypWIAgraFort2:
+			case cUnitTypeypWIAgraFort3:
+			case cUnitTypeypWIAgraFort4:
+			case cUnitTypeypWIAgraFort5:
+			case cUnitTypeOutpost:
+			case cUnitTypedeTower:
+			case cUnitTypeypCastle:
+			case cUnitTypeBlockhouse:
+			case cUnitTypeYPOutpostAsian:
+			case cUnitTypedeIncaStronghold:
+			case cUnitTypedeUniqueTower:
+			case cUnitTypedePalace:
+			{
+				militaryPower += 4.0;
+				break;
+			}
+		}
+		if (kbProtoUnitIsType(cMyID, enemyPUID, cUnitTypeLogicalTypeLandMilitary) == true)
+		{
+			militaryPower += getMilitaryUnitStrength(enemyPUID);
+		}
+	}
+	return (militaryPower);
+}
+
+
+//==============================================================================
+/* tradingPostMonitor
+
+	Owns all ordinary native- and trade-socket claims. It runs only after the
+	Town Center setup has completed, validates each socket independently, and
+	tracks its plan through success, failure, or timeout.
+*/
+//==============================================================================
+rule tradingPostMonitor
+inactive
+minInterval 1
+{
+	static int activePlanID = -1;
+	static int activeSocketID = -1;
+	static int activeBuilderID = -1;
+	static int activeStartTime = -1;
+	static bool activeSocketIsNative = false;
+	static int activeLastProgressTime = -1;
+	static float activeBestBuilderDistance = 99999.0;
+	static int activeLastPlanState = -999;
+	static int activeLastOwnerID = -999;
+	static int activeLastFoundationID = -999;
+	static int retryAfterTime = -1;
+	static int enemyQuery = -1;
+
+	int time = xsGetTime();
+	vector activeSocketPosition = cInvalidVector;
+	int activePlanState = -1;
+	int ownTradingPostID = -1;
+	int completedTradingPostID = -1;
+	int occupyingTradingPostID = -1;
+
+	if (enemyQuery < 0)
+	{
+		enemyQuery = kbUnitQueryCreate("Better AI TP danger query");
+		kbUnitQuerySetIgnoreKnockedOutUnits(enemyQuery, true);
+		kbUnitQuerySetPlayerRelation(enemyQuery, cPlayerRelationEnemyNotGaia);
+		kbUnitQuerySetState(enemyQuery, cUnitStateABQ);
+		kbUnitQuerySetMaximumDistance(enemyQuery, 50.0);
+		kbUnitQuerySetUnitType(enemyQuery, cUnitTypeHasBountyValue);
+		xsSetRuleMinIntervalSelf(15);
+	}
+
+	// Reconcile the active socket even after the engine retires its plan. Native
+	// sockets can continue a slower self-owned claim without a live builder plan.
+	if (activeSocketID >= 0)
+	{
+		activeSocketPosition = kbUnitGetPosition(activeSocketID);
+		if (activeSocketPosition != cInvalidVector)
+		{
+			ownTradingPostID = getUnitByLocation(cUnitTypeTradingPost, cMyID, cUnitStateABQ,
+				activeSocketPosition, 10.0);
+			completedTradingPostID = getUnitByLocation(cUnitTypeTradingPost, cMyID, cUnitStateAlive,
+				activeSocketPosition, 10.0);
+			occupyingTradingPostID = getUnitByLocation(cUnitTypeTradingPost, cPlayerRelationAny,
+				cUnitStateABQ, activeSocketPosition, 10.0);
+		}
+		if (activePlanID >= 0)
+		{
+			activePlanState = aiPlanGetState(activePlanID);
+		}
+
+		int activeOwnerID = -1;
+		int activeOwnershipClass = cNativeSocketOwnershipNeutral;
+		if (activeSocketIsNative == true && activeSocketPosition != cInvalidVector)
+		{
+			activeOwnerID = kbUnitGetPlayerID(activeSocketID);
+			activeOwnershipClass = getNativeSocketOwnershipClass(activeSocketID,
+				occupyingTradingPostID);
+		}
+		int foundationOwnerID = -1;
+		if (occupyingTradingPostID >= 0)
+		{
+			foundationOwnerID = kbUnitGetPlayerID(occupyingTradingPostID);
+		}
+
+		if (activePlanState != activeLastPlanState)
+		{
+			debugEvent("TP", "transition plan-state: socket=" + activeSocketID + " plan=" +
+				activePlanID + " old=" + activeLastPlanState + " new=" + activePlanState);
+			activeLastPlanState = activePlanState;
+			activeLastProgressTime = time;
+		}
+		if (activeSocketIsNative == true && activeOwnerID != activeLastOwnerID)
+		{
+			debugEvent("TP", "transition ownership: socket=" + activeSocketID + " oldOwner=" +
+				activeLastOwnerID + " newOwner=" + activeOwnerID + " class=" +
+				activeOwnershipClass);
+			activeLastOwnerID = activeOwnerID;
+			activeLastProgressTime = time;
+		}
+		if (occupyingTradingPostID != activeLastFoundationID)
+		{
+			debugEvent("TP", "transition foundation: socket=" + activeSocketID + " old=" +
+				activeLastFoundationID + " new=" + occupyingTradingPostID + " owner=" +
+				foundationOwnerID);
+			activeLastFoundationID = occupyingTradingPostID;
+			activeLastProgressTime = time;
+		}
+
+		bool activeBuilderValid = false;
+		float activeBuilderDistance = 99999.0;
+		if (activeBuilderID >= 0 && kbUnitGetPlayerID(activeBuilderID) == cMyID &&
+			kbUnitGetPosition(activeBuilderID) != cInvalidVector)
+		{
+			int activeBuilderPUID = kbUnitGetProtoUnitID(activeBuilderID);
+			int activeSocketAreaGroup = kbAreaGroupGetIDByPosition(activeSocketPosition);
+			int activeBuilderAreaGroup = kbAreaGroupGetIDByPosition(kbUnitGetPosition(activeBuilderID));
+			activeBuilderValid =
+				(kbProtoUnitCanTrain(activeBuilderPUID, cUnitTypeTradingPost) == true) &&
+				(activeSocketAreaGroup >= 0) && (activeBuilderAreaGroup >= 0) &&
+				(kbAreAreaGroupsPassableByLand(activeBuilderAreaGroup, activeSocketAreaGroup) == true);
+			if (activeBuilderValid == true)
+			{
+				activeBuilderDistance = getDistance(kbUnitGetPosition(activeBuilderID),
+					activeSocketPosition);
+				if (activeBestBuilderDistance - activeBuilderDistance >= 2.0)
+				{
+					activeBestBuilderDistance = activeBuilderDistance;
+					activeLastProgressTime = time;
+				}
+			}
+		}
+
+		if (completedTradingPostID >= 0)
+		{
+			if (activePlanState >= 0)
+				aiPlanDestroy(activePlanID);
+			debugEvent("TP", "claim complete: socket=" + activeSocketID + " plan=" + activePlanID);
+			activePlanID = -1;
+			activeSocketID = -1;
+			activeBuilderID = -1;
+			activeStartTime = -1;
+			activeLastProgressTime = -1;
+			activeBestBuilderDistance = 99999.0;
+			activeLastPlanState = -999;
+			activeLastOwnerID = -999;
+			activeLastFoundationID = -999;
+			return;
+		}
+
+		// A hard claim by an ally is a successful team outcome. An enemy hard
+		// claim invalidates this attempt; an own foundation remains supervised.
+		if (occupyingTradingPostID >= 0 && foundationOwnerID != cMyID)
+		{
+			if (kbIsPlayerAlly(foundationOwnerID) == true)
+			{
+				if (activePlanState >= 0)
+				{
+					aiPlanDestroy(activePlanID);
+				}
+				debugEvent("TP", "team claim accepted: socket=" + activeSocketID + " owner=" +
+					foundationOwnerID + " hard=1");
+				activePlanID = -1;
+				activeSocketID = -1;
+				activeBuilderID = -1;
+				activeStartTime = -1;
+				activeLastProgressTime = -1;
+				activeBestBuilderDistance = 99999.0;
+				activeLastPlanState = -999;
+				activeLastOwnerID = -999;
+				activeLastFoundationID = -999;
+				return;
+			}
+		}
+
+		if (ownTradingPostID >= 0)
+		{
+			if (activePlanState < 0 && activePlanID >= 0)
+			{
+				debugEvent("TP", "transition plan-retired with own foundation: socket=" +
+					activeSocketID + " plan=" + activePlanID);
+				activePlanID = -1;
+				activeLastPlanState = -1;
+				activeLastProgressTime = time;
+			}
+			// Trade sockets retain the prior hard-foundation behavior. Native
+			// foundations remain supervised for their 180-second progress window.
+			if (activeSocketIsNative == false)
+			{
+				if (activePlanState >= 0)
+				{
+					return;
+				}
+				activePlanID = -1;
+				activeSocketID = -1;
+				activeBuilderID = -1;
+				activeStartTime = -1;
+				activeLastProgressTime = -1;
+				activeBestBuilderDistance = 99999.0;
+				activeLastPlanState = -999;
+				activeLastOwnerID = -999;
+				activeLastFoundationID = -999;
+				return;
+			}
+			activeOwnershipClass = cNativeSocketOwnershipSelf;
+		}
+
+		// Soft allied ownership is also a successful team claim. Self and safe
+		// enemy soft ownership remain actionable; enemy ownership is reclaimable.
+		if (activeSocketIsNative == true &&
+			activeOwnershipClass == cNativeSocketOwnershipAlly)
+		{
+			if (activePlanState >= 0)
+			{
+				aiPlanDestroy(activePlanID);
+			}
+			debugEvent("TP", "team claim accepted: socket=" + activeSocketID + " owner=" +
+				activeOwnerID + " hard=0");
+			activePlanID = -1;
+			activeSocketID = -1;
+			activeBuilderID = -1;
+			activeStartTime = -1;
+			activeLastProgressTime = -1;
+			activeBestBuilderDistance = 99999.0;
+			activeLastPlanState = -999;
+			activeLastOwnerID = -999;
+			activeLastFoundationID = -999;
+			return;
+		}
+
+		bool activeClaimFailed = false;
+		string activeFailureReason = "";
+		if (activeSocketPosition == cInvalidVector)
+		{
+			activeClaimFailed = true;
+			activeFailureReason = "socket-invalid";
+		}
+		else if (occupyingTradingPostID >= 0 && foundationOwnerID != cMyID)
+		{
+			activeClaimFailed = true;
+			activeFailureReason = "enemy-hard-claim";
+		}
+		else if (getTradingPostSocketDanger(enemyQuery, activeSocketPosition) >= 5.0)
+		{
+			activeClaimFailed = true;
+			activeFailureReason = "danger";
+		}
+		else if (activePlanState < 0 && activePlanID >= 0)
+		{
+			if (activeSocketIsNative == true &&
+				activeOwnershipClass == cNativeSocketOwnershipSelf)
+			{
+				debugEvent("TP", "transition plan-retired with self soft claim: socket=" +
+					activeSocketID + " plan=" + activePlanID);
+				activePlanID = -1;
+				activeLastPlanState = -1;
+				activeLastProgressTime = time;
+			}
+			else
+			{
+				activeClaimFailed = true;
+				activeFailureReason = "plan-retired";
+			}
+		}
+		else if (activeBuilderValid == false ||
+			(activePlanID >= 0 && kbUnitGetPlanID(activeBuilderID) != activePlanID))
+		{
+			if (activeSocketIsNative == false ||
+				activeOwnershipClass != cNativeSocketOwnershipSelf)
+			{
+				activeClaimFailed = true;
+				activeFailureReason = "builder-invalid-or-reassigned";
+			}
+		}
+
+		int noProgressLimit = 120000;
+		if (activeSocketIsNative == true)
+		{
+			if (activeOwnershipClass == cNativeSocketOwnershipSelf)
+			{
+				noProgressLimit = 180000;
+			}
+			else
+			{
+				noProgressLimit = 60000;
+			}
+		}
+		int timeSinceProgress = time - activeLastProgressTime;
+		if ((activeClaimFailed == false) &&
+			(timeSinceProgress >= noProgressLimit))
+		{
+			activeClaimFailed = true;
+			activeFailureReason = "no-progress-" + noProgressLimit;
+		}
+
+		if (activeClaimFailed == true)
+		{
+			if (activePlanState >= 0)
+			{
+				aiPlanDestroy(activePlanID);
+			}
+			debugEvent("TP", "claim failed; retry in 60s: socket=" + activeSocketID +
+				" builder=" + activeBuilderID + " plan=" + activePlanID + " state=" +
+				activePlanState + " reason=" + activeFailureReason);
+
+			// A failed attempt should be eligible again after the explicit retry
+			// delay instead of also waiting out the normal five-minute cooldown.
+			if (activeSocketIsNative == true)
+				gLastClaimNativeMissionTime = time - gClaimNativeMissionInterval;
+			else
+				gLastClaimTradeMissionTime = time - gClaimTradeMissionInterval;
+
+			retryAfterTime = time + 60000;
+			activePlanID = -1;
+			activeSocketID = -1;
+			activeBuilderID = -1;
+			activeStartTime = -1;
+			activeLastProgressTime = -1;
+			activeBestBuilderDistance = 99999.0;
+			activeLastPlanState = -999;
+			activeLastOwnerID = -999;
+			activeLastFoundationID = -999;
+			return;
+		}
+
+		return;
+	}
+
+	if (time < retryAfterTime)
+		return;
+
+	// Respect a TP build plan created by a scenario-specific system.
+	if (aiPlanGetIDByTypeAndVariableType(cPlanBuild, cBuildPlanBuildingTypeID,
+		cUnitTypeTradingPost) >= 0)
+	{
+		return;
+	}
+
+	int mainBaseID = kbBaseGetMainID(cMyID);
+	vector mainBaseLocation = kbBaseGetLocation(cMyID, mainBaseID);
+	if (mainBaseLocation == cInvalidVector)
+		return;
+
+	int socketQuery = createSimpleUnitQuery(cUnitTypeSocket, cPlayerRelationAny, cUnitStateAlive);
+	int numberSocketsFound = kbUnitQueryExecute(socketQuery);
+	int totalTradeSockets = 0;
+	int totalNativeSockets = 0;
+	int ownedTradePosts = 0;
+	int ownedNativePosts = 0;
+	int alliedTradePosts = 0;
+	int alliedNativeClaims = 0;
+	int bestTradeSocketID = -1;
+	int bestNativeSocketID = -1;
+	int bestTradeBuilderID = -1;
+	int bestNativeBuilderID = -1;
+	float bestTradeDistancePenalty = 99.99;
+	float bestNativeDistancePenalty = 99.99;
+	int bestNativeOwnerRank = 99;
+	int bestNativeOwnerID = -1;
+	bool bestTradeIsEarly = false;
+	int socketID = -1;
+	vector socketPosition = cInvalidVector;
+	int socketPUID = -1;
+	bool socketIsNative = false;
+	int socketOwnerID = -1;
+	int socketOwnershipClass = cNativeSocketOwnershipNeutral;
+	int candidateOwnerRank = 99;
+	int candidateBuilderID = -1;
+	bool candidateBuilderIsWagon = false;
+	float distancePenalty = 0.0;
+	int index = 0;
+
+	for (index = 0; < numberSocketsFound)
+	{
+		socketID = kbUnitQueryGetResult(socketQuery, index);
+		socketPosition = kbUnitGetPosition(socketID);
+		socketPUID = kbUnitGetProtoUnitID(socketID);
+		if ((socketPosition == cInvalidVector) ||
+			(socketPUID == cUnitTypedeSPCSocketCityState))
+		{
+			continue;
+		}
+
+		socketIsNative = kbUnitIsType(socketID, cUnitTypeNativeSocket);
+		if (socketIsNative == true)
+			totalNativeSockets++;
+		else
+			totalTradeSockets++;
+
+		occupyingTradingPostID = getUnitByLocation(cUnitTypeTradingPost, cPlayerRelationAny,
+			cUnitStateABQ, socketPosition, 10.0);
+		if (occupyingTradingPostID >= 0)
+		{
+			int occupyingPlayerID = kbUnitGetPlayerID(occupyingTradingPostID);
+			if (occupyingPlayerID == cMyID)
+			{
+				if (socketIsNative == true)
+					ownedNativePosts++;
+				else
+					ownedTradePosts++;
+			}
+			else if (kbIsPlayerAlly(occupyingPlayerID) == true)
+			{
+				if (socketIsNative == true)
+					alliedNativeClaims++;
+				else
+					alliedTradePosts++;
+			}
+			continue;
+		}
+
+		socketOwnerID = -1;
+		socketOwnershipClass = cNativeSocketOwnershipNeutral;
+		candidateOwnerRank = 99;
+		if (socketIsNative == true)
+		{
+			socketOwnerID = kbUnitGetPlayerID(socketID);
+			socketOwnershipClass = getNativeSocketOwnershipClass(socketID, -1);
+			if (socketOwnershipClass == cNativeSocketOwnershipAlly)
+			{
+				alliedNativeClaims++;
+				continue;
+			}
+			if (socketOwnershipClass == cNativeSocketOwnershipSelf)
+				candidateOwnerRank = 0;
+			else if (socketOwnershipClass == cNativeSocketOwnershipNeutral)
+				candidateOwnerRank = 1;
+			else
+				candidateOwnerRank = 2;
+		}
+
+		// A disabled category must not abort the other category's scan.
+		if (((socketIsNative == true) && (cvOkToAllyNatives == false)) ||
+			((socketIsNative == false) && (cvOkToClaimTrade == false)))
+		{
+			continue;
+		}
+
+		// Reset all candidate-local state before inspecting this socket.
+		distancePenalty = 0.0;
+		if (getTradingPostSocketDanger(enemyQuery, socketPosition) >= 5.0)
+			continue;
+
+		candidateBuilderID = findTradingPostBuilder(socketPosition);
+		if (candidateBuilderID < 0)
+			continue;
+		candidateBuilderIsWagon = kbUnitIsType(candidateBuilderID, cUnitTypeAbstractWagon);
+
+		if (socketIsNative == true)
+		{
+			// A dedicated wagon may claim early; normal native claims begin in
+			// Fortress Age and obey their own five-minute cooldown.
+			if ((candidateBuilderIsWagon == false) &&
+				((kbGetAge() < cAge3) ||
+			 (time - gLastClaimNativeMissionTime < gClaimNativeMissionInterval)))
+			{
+				continue;
+			}
+		}
+		else
+		{
+			if ((candidateBuilderIsWagon == false) &&
+				(time - gLastClaimTradeMissionTime < gClaimTradeMissionInterval))
+			{
+				continue;
+			}
+
+			if ((candidateBuilderIsWagon == false) &&
+				(kbGetAge() == cAge1) && (agingUp() == false))
+			{
+				if ((cMyCiv == cCivIndians) || (cMyCiv == cCivSPCIndians) ||
+					(cMyCiv == cCivBritish) || (cMyCiv == cCivChinese) ||
+					(cMyCiv == cCivSPCChinese) || (cMyCiv == cCivDESwedish) ||
+					(cMyCiv == cCivDEInca) ||
+					(isProtoUnitAffordable(cUnitTypeTradingPost) == false))
+				{
+					continue;
+				}
+			}
+		}
+
+		distancePenalty = getDistance(mainBaseLocation, socketPosition) / 1000.0;
+		if (distancePenalty > 0.4)
+			distancePenalty = 0.4;
+
+		if (socketIsNative == true)
+		{
+			if (candidateOwnerRank < bestNativeOwnerRank ||
+				(candidateOwnerRank == bestNativeOwnerRank &&
+			 distancePenalty < bestNativeDistancePenalty))
+			{
+				bestNativeSocketID = socketID;
+				bestNativeBuilderID = candidateBuilderID;
+				bestNativeDistancePenalty = distancePenalty;
+				bestNativeOwnerRank = candidateOwnerRank;
+				bestNativeOwnerID = socketOwnerID;
+			}
+		}
+		else if (distancePenalty < bestTradeDistancePenalty)
+		{
+			bestTradeSocketID = socketID;
+			bestTradeBuilderID = candidateBuilderID;
+			bestTradeDistancePenalty = distancePenalty;
+			bestTradeIsEarly = (kbGetAge() == cAge1);
+		}
+	}
+
+	int teamDivisor = getAllyCount() + 1;
+	int wantedTradePosts = totalTradeSockets / teamDivisor;
+	int wantedNativePosts = totalNativeSockets / teamDivisor;
+	if ((totalTradeSockets > 0) && (wantedTradePosts < 1))
+		wantedTradePosts = 1;
+	if ((totalNativeSockets > 0) && (wantedNativePosts < 1))
+		wantedNativePosts = 1;
+	int teamHardTradePosts = ownedTradePosts + alliedTradePosts;
+	int teamNativeClaims = ownedNativePosts + alliedNativeClaims;
+	if (teamHardTradePosts >= wantedTradePosts)
+		bestTradeSocketID = -1;
+	if (teamNativeClaims >= wantedNativePosts && bestNativeOwnerRank != 0)
+		bestNativeSocketID = -1;
+
+	// Preserve Better AI's trade-first policy.
+	int selectedSocketID = bestTradeSocketID;
+	int selectedBuilderID = bestTradeBuilderID;
+	bool selectedSocketIsNative = false;
+	bool selectedIsEarlyTrade = bestTradeIsEarly;
+	int selectedScannedOwnerID = -1;
+	if (selectedSocketID < 0)
+	{
+		selectedSocketID = bestNativeSocketID;
+		selectedBuilderID = bestNativeBuilderID;
+		selectedSocketIsNative = true;
+		selectedIsEarlyTrade = false;
+		selectedScannedOwnerID = bestNativeOwnerID;
+	}
+	if ((selectedSocketID < 0) || (selectedBuilderID < 0))
+		return;
+
+	// Revalidate both objects immediately before activating the plan.
+	vector selectedSocketPosition = kbUnitGetPosition(selectedSocketID);
+	int selectedSocketPUID = kbUnitGetProtoUnitID(selectedSocketID);
+	int selectedBuilderPUID = kbUnitGetProtoUnitID(selectedBuilderID);
+	bool selectedBuilderIsDedicated =
+		(kbUnitIsType(selectedBuilderID, cUnitTypeAbstractWagon) ||
+		 kbUnitIsType(selectedBuilderID, cUnitTypeHero));
+	int selectedSocketAreaGroup = kbAreaGroupGetIDByPosition(selectedSocketPosition);
+	int selectedBuilderAreaGroup = kbAreaGroupGetIDByPosition(kbUnitGetPosition(selectedBuilderID));
+	int selectedOccupyingTradingPostID = getUnitByLocation(cUnitTypeTradingPost,
+		cPlayerRelationAny, cUnitStateABQ, selectedSocketPosition, 10.0);
+	int selectedOwnerID = -1;
+	int selectedOwnershipClass = cNativeSocketOwnershipNeutral;
+	if (selectedSocketIsNative == true)
+	{
+		selectedOwnerID = kbUnitGetPlayerID(selectedSocketID);
+		selectedOwnershipClass = getNativeSocketOwnershipClass(selectedSocketID,
+			selectedOccupyingTradingPostID);
+	}
+
+	if ((selectedSocketPosition == cInvalidVector) ||
+		(selectedSocketPUID == cUnitTypedeSPCSocketCityState) ||
+		(selectedOccupyingTradingPostID >= 0) ||
+		((selectedSocketIsNative == true) &&
+		 (selectedOwnershipClass == cNativeSocketOwnershipAlly)) ||
+		(getTradingPostSocketDanger(enemyQuery, selectedSocketPosition) >= 5.0) ||
+		(kbUnitGetPlayerID(selectedBuilderID) != cMyID) ||
+		(kbUnitGetPlanID(selectedBuilderID) >= 0) ||
+		(kbProtoUnitCanTrain(selectedBuilderPUID, cUnitTypeTradingPost) == false) ||
+		((selectedBuilderIsDedicated == true) &&
+		 (kbUnitGetActionType(selectedBuilderID) != cActionTypeIdle)) ||
+		(selectedSocketAreaGroup < 0) || (selectedBuilderAreaGroup < 0) ||
+		(kbAreAreaGroupsPassableByLand(selectedBuilderAreaGroup, selectedSocketAreaGroup) == false))
+	{
+		debugEvent("TP", "candidate invalidated before activation: socket=" + selectedSocketID +
+			" builder=" + selectedBuilderID);
+		return;
+	}
+
+	int planID = aiPlanCreate("Better AI Trading Post Build Plan", cPlanBuild);
+	if (planID < 0)
+	{
+		retryAfterTime = time + 60000;
+		debugEvent("TP", "plan creation failed; retry in 60s: socket=" + selectedSocketID);
+		return;
+	}
+
+	aiPlanSetVariableInt(planID, cBuildPlanBuildingTypeID, 0, cUnitTypeTradingPost);
+	aiPlanSetVariableInt(planID, cBuildPlanSocketID, 0, selectedSocketID);
+	aiPlanAddUnitType(planID, selectedBuilderPUID, 1, 1, 1);
+	aiPlanAddUnit(planID, selectedBuilderID);
+	aiPlanSetDesiredPriority(planID, 97);
+	if (selectedIsEarlyTrade == true)
+		aiPlanSetDesiredResourcePriority(planID, 70);
+	else
+		aiPlanSetDesiredResourcePriority(planID, 55);
+	aiPlanSetActive(planID);
+
+	activePlanID = planID;
+	activeSocketID = selectedSocketID;
+	activeBuilderID = selectedBuilderID;
+	activeStartTime = time;
+	activeSocketIsNative = selectedSocketIsNative;
+	activeLastProgressTime = time;
+	activeBestBuilderDistance = getDistance(kbUnitGetPosition(selectedBuilderID),
+		selectedSocketPosition);
+	activeLastPlanState = aiPlanGetState(planID);
+	activeLastOwnerID = selectedOwnerID;
+	activeLastFoundationID = -1;
+	retryAfterTime = -1;
+	if (selectedSocketIsNative == true)
+	{
+		gLastClaimNativeMissionTime = time;
+		debugEvent("TP", "native claim activated: socket=" + selectedSocketID +
+			" builder=" + selectedBuilderID + " plan=" + planID + " owner=" +
+			selectedOwnerID + " class=" + selectedOwnershipClass + " scannedOwner=" +
+			selectedScannedOwnerID + " teamClaims=" + teamNativeClaims + "/" +
+			wantedNativePosts);
+	}
+	else
+	{
+		gLastClaimTradeMissionTime = time;
+		debugEvent("TP", "trade claim activated: socket=" + selectedSocketID +
+			" builder=" + selectedBuilderID + " plan=" + planID + " teamPosts=" +
+			teamHardTradePosts + "/" + wantedTradePosts);
 	}
 }
 

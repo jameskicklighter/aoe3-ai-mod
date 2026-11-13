@@ -16,22 +16,54 @@
    If vector is not cInvalidVector, it will be added as a flare.
 */
 //==============================================================================
+bool isMilitaryHelpPrompt(int commPromptID = -1)
+{
+	return (
+		commPromptID == cAICommPromptToAllyINeedHelpMyBase ||
+		commPromptID == cAICommPromptToAllyIWillAttackWithYou ||
+		commPromptID == cAICommPromptToAllyIWillHelpDefend ||
+		commPromptID == cAICommPromptToAllyDeclineGeneral ||
+		commPromptID == cAICommPromptToAllyDeclineProhibited ||
+		commPromptID == cAICommPromptToAllyDeclineCantAfford ||
+		commPromptID == cAICommPromptToAllyDeclineSmallArmy ||
+		commPromptID == cAICommPromptToAllyDeclineNoArmy);
+}
+
+
 void sendStatement(int playerIDorRelation = -1, int commPromptID = -1, vector vec = cInvalidVector)
 {
+	bool traceMilitaryHelp = isMilitaryHelpPrompt(commPromptID);
+	int engineReturn = -1;
+	if (cvOkToTaunt == false)
+	{
+		if (traceMilitaryHelp == true)
+		{
+			debugEvent("MIL-COMMS", "send blocked target=" + playerIDorRelation + " prompt=" +
+				commPromptID + " gate=cvOkToTaunt");
+		}
+		return;
+	}
+
 	if (cvOkToTaunt == true)
 	{
 		// It's a player ID, not a relation.
 		if (playerIDorRelation < 100)
 		{
 			int playerID = playerIDorRelation;
+			engineReturn = -1;
 			debugChats("Sending AI Chat to player: " + playerID + ", commPromptID: " + commPromptID + ", vector: " + vec); 
 			if (vec == cInvalidVector)
 			{
-				aiCommsSendStatement(playerID, commPromptID);
+				engineReturn = aiCommsSendStatement(playerID, commPromptID);
 			}
 			else
 			{
-				aiCommsSendStatementWithVector(playerID, commPromptID, vec);
+				engineReturn = aiCommsSendStatementWithVector(playerID, commPromptID, vec);
+			}
+			if (traceMilitaryHelp == true)
+			{
+				debugEvent("MIL-COMMS", "send recipient=" + playerID + " prompt=" + commPromptID +
+					" raw=" + engineReturn + " pos=" + vec);
 			}
 		}
 		else // It's a player relation.
@@ -87,16 +119,22 @@ void sendStatement(int playerIDorRelation = -1, int commPromptID = -1, vector ve
 				}
 				if (send == true)
 				{
-				if (vec == cInvalidVector)
-				{
-					aiCommsSendStatement(player, commPromptID);
-					debugChats("Sending AI Chat to player: " + player + ", commPromptID: " + commPromptID);
-				}
-				else
-				{
-					aiCommsSendStatementWithVector(player, commPromptID, vec);
-					debugChats("Sending AI Chat to player: " + player + ", commPromptID: " + commPromptID + ", vector: " + vec);
-				}
+					engineReturn = -1;
+					if (vec == cInvalidVector)
+					{
+						engineReturn = aiCommsSendStatement(player, commPromptID);
+						debugChats("Sending AI Chat to player: " + player + ", commPromptID: " + commPromptID);
+					}
+					else
+					{
+						engineReturn = aiCommsSendStatementWithVector(player, commPromptID, vec);
+						debugChats("Sending AI Chat to player: " + player + ", commPromptID: " + commPromptID + ", vector: " + vec);
+					}
+					if (traceMilitaryHelp == true)
+					{
+						debugEvent("MIL-COMMS", "send relation=" + playerIDorRelation + " recipient=" +
+							player + " prompt=" + commPromptID + " raw=" + engineReturn + " pos=" + vec);
+					}
 				}
 			}
 		}
@@ -1708,6 +1746,8 @@ void nuggetHandler(int playerID = -1)
 void commHandler(int chatID = -1, int statementID = -1)
 {
 	int fromID = -1; // Which player sent this?
+	int promptType = -1;
+	bool allyHelpRequest = false;
 
 	if (chatID >= 0)
 	{
@@ -1716,18 +1756,39 @@ void commHandler(int chatID = -1, int statementID = -1)
 	else
 	{
 		fromID = aiCommsGetStatementPlayerID(statementID);
+		promptType = aiCommsGetStatementPromptType(statementID);
+		allyHelpRequest = (promptType == cAICommPromptToAllyINeedHelpMyBase);
+		if (allyHelpRequest == true)
+		{
+			debugEvent("MIL-COMMS", "receipt statement=" + statementID + " from=" + fromID +
+				" prompt=" + promptType + " pos=" + aiCommsGetStatementPosition(statementID));
+		}
 	}
 
 	// DO NOT react to my own commands/requests.
 	// DO NOT accept commands/requests from enemies.
 	if (fromID == cMyID || (kbIsPlayerEnemy(fromID) == true && fromID != 0))
 	{
+		if (allyHelpRequest == true)
+		{
+			debugEvent("MIL-COMMS", "rejected from=" + fromID + " reason=self-or-enemy");
+		}
 		return;
+	}
+
+	if (allyHelpRequest == true)
+	{
+		debugEvent("MIL-COMMS", "received request from player " + fromID + " at " +
+			aiCommsGetStatementPosition(statementID));
 	}
 
 	int age = kbGetAge();
 	if (age == cAge1)
 	{	// Don't do anything in Exploration since it often makes no sense or would mess up our start.
+		if (allyHelpRequest == true)
+		{
+			debugEvent("MIL-COMMS", "rejected player " + fromID + ": still in Exploration Age");
+		}
 		if (chatID >= 0)
 		{
 			// Only respond to chats.
@@ -1750,8 +1811,6 @@ void commHandler(int chatID = -1, int statementID = -1)
 	}
 	else if (statementID >= 0)
 	{
-		int promptType = aiCommsGetStatementPromptType(statementID);
-
 		// Only respond to certain prompt types.
 		switch(promptType)
 		{
@@ -1760,6 +1819,7 @@ void commHandler(int chatID = -1, int statementID = -1)
 				verb = cPlayerChatVerbAttack;
 				targetType = cPlayerChatTargetTypeLocation;
 				location = aiCommsGetStatementPosition(statementID);
+				break;
 			}
 			case cAICommPromptToAllyRequestFood:
 			{
@@ -1826,6 +1886,10 @@ void commHandler(int chatID = -1, int statementID = -1)
 			if (aiTreatyActive() == true)
 			{
 				sendStatement(fromID, cAICommPromptToAllyDeclineProhibited);
+				if (allyHelpRequest == true)
+				{
+					debugEvent("MIL-COMMS", "rejected player " + fromID + ": treaty active");
+				}
 				debugChats("Deny attack/defend request because treaty is active");
 				break;
 			}
@@ -1840,12 +1904,22 @@ void commHandler(int chatID = -1, int statementID = -1)
 			if (currentFreeMilitaryPop < 5)
 			{
 				sendStatement(fromID, cAICommPromptToAllyDeclineNoArmy);
+				if (allyHelpRequest == true)
+				{
+					debugEvent("MIL-COMMS", "rejected player " + fromID +
+						": reserve population " + currentFreeMilitaryPop + " is below 5");
+				}
 				debugChats("Deny attack/defend request because no army");
 				break;
 			}
 			if (currentFreeMilitaryPop < 15)
 			{
 				sendStatement(fromID, cAICommPromptToAllyDeclineSmallArmy);
+				if (allyHelpRequest == true)
+				{
+					debugEvent("MIL-COMMS", "rejected player " + fromID +
+						": reserve population " + currentFreeMilitaryPop + " is below 15");
+				}
 				debugChats("Deny attack/defend request because small army");
 				break;
 			}
@@ -1853,6 +1927,11 @@ void commHandler(int chatID = -1, int statementID = -1)
 			if (isDefendingOrAttacking() == true)
 			{
 				sendStatement(fromID, cAICommPromptToAllyDeclineGeneral);
+				if (allyHelpRequest == true)
+				{
+					debugEvent("MIL-COMMS", "rejected player " + fromID +
+						": another land mission is active");
+				}
 				break;
 			}
 			
@@ -1870,6 +1949,11 @@ void commHandler(int chatID = -1, int statementID = -1)
 					if (gDefenseReflexBaseID == mainBaseID)
 					{
 						sendStatement(fromID, cAICommPromptToAllyDeclineGeneral);
+						if (allyHelpRequest == true)
+						{
+							debugEvent("MIL-COMMS", "rejected player " + fromID +
+								": own main-base reflex is active");
+						}
 						debugChats("Deny attack/defend request because we're under attack ourselves");
 						break;
 					}
@@ -1883,6 +1967,11 @@ void commHandler(int chatID = -1, int statementID = -1)
 					if ((numEnemyBuildings == 0) && (numAlliedBuildings == 0))
 					{
 						sendStatement(fromID, cAICommPromptToAllyDeclineGeneral);
+						if (allyHelpRequest == true)
+						{
+							debugEvent("MIL-COMMS", "rejected player " + fromID +
+								": no buildings near requested location " + location);
+						}
 						debugChats("Deny attack/defend request because no buildings found");
 						break;
 					}
@@ -1896,8 +1985,25 @@ void commHandler(int chatID = -1, int statementID = -1)
 							location, 50.0);
 						int playerToAttack = kbUnitGetPlayerID(enemyBuildingID);
 						vector gatherPoint = kbBaseGetMilitaryGatherPoint(cMyID, mainBaseID);
+						if (allyHelpRequest == true)
+						{
+							debugEvent("MIL-COMMS", "resolved request from=" + fromID + " mode=attack building=" +
+								enemyBuildingID + " owner=" + playerToAttack + " base=" +
+								kbUnitGetBaseID(enemyBuildingID));
+						}
 
 						combatPlanID = aiPlanCreate("commHandler Attack Player " + playerToAttack, cPlanCombat);
+						if (combatPlanID < 0)
+						{
+							sendStatement(fromID, cAICommPromptToAllyDeclineGeneral);
+							debugEvent("MIL-INVARIANT", "commHandler failed to create requested attack plan");
+							if (allyHelpRequest == true)
+							{
+								debugEvent("MIL-COMMS", "rejected player " + fromID +
+									": requested attack plan creation failed");
+							}
+							break;
+						}
 
 						aiPlanSetVariableInt(combatPlanID, cCombatPlanCombatType, 0, cCombatPlanCombatTypeAttack);
 						aiPlanSetVariableInt(combatPlanID, cCombatPlanTargetPlayerID, 0, playerToAttack);
@@ -1910,23 +2016,34 @@ void commHandler(int chatID = -1, int statementID = -1)
 						if (cDifficultyCurrent >= cDifficultyHard)
 						{
 							aiPlanSetVariableInt(combatPlanID, cCombatPlanRefreshFrequency, 0, 300);
-							aiPlanSetVariableInt(combatPlanID, cCombatPlanRetreatMode, 0, cCombatPlanRetreatModeNone);
+							aiPlanSetVariableInt(combatPlanID, cCombatPlanDoneMode, 0,
+								cCombatPlanDoneModeRetreat | cCombatPlanDoneModeBaseGone);
+							aiPlanSetVariableInt(combatPlanID, cCombatPlanRetreatMode, 0,
+								cCombatPlanRetreatModeOutnumbered);
 							// updateMilitaryTrainPlanBuildings(gForwardBaseID);
 							aiPlanSetVariableBool(combatPlanID, cCombatPlanAllowMoreUnitsDuringAttack, 0, true);
 						}
 						else
 						{
 							aiPlanSetVariableInt(combatPlanID, cCombatPlanRefreshFrequency, 0, 1000);
+							aiPlanSetVariableInt(combatPlanID, cCombatPlanDoneMode, 0,
+								cCombatPlanDoneModeBaseGone);
 						}
-						aiPlanSetVariableInt(combatPlanID, cCombatPlanDoneMode, 0, cCombatPlanDoneModeBaseGone);
 						aiPlanSetBaseID(combatPlanID, mainBaseID);
 						aiPlanSetInitialPosition(combatPlanID, gatherPoint);
 					
 						addUnitsToMilitaryPlan(combatPlanID);
-					
+						registerTransientLandCombatMission(combatPlanID, cLandMissionSourceRequestedAttack);
 						aiPlanSetActive(combatPlanID);
 					
 						gLastAttackMissionTime = xsGetTime();
+						debugEvent("MIL-MISSION", "created requested attack plan " + combatPlanID +
+							" for player " + playerToAttack);
+						if (allyHelpRequest == true)
+						{
+							debugEvent("MIL-COMMS", "accepted player " + fromID + " with attack plan " +
+								combatPlanID + " against player " + playerToAttack);
+						}
 						
 						sendStatement(fromID, cAICommPromptToAllyIWillAttackWithYou, location);
 						debugChats("Confirming attack request");
@@ -1936,7 +2053,24 @@ void commHandler(int chatID = -1, int statementID = -1)
 						int alliedBuildingID = getClosestUnit(cUnitTypeBuilding, cPlayerRelationAlly, cUnitStateAlive,
 							location, 50.0);
 						int playerToDefend = kbUnitGetPlayerID(alliedBuildingID);
+						if (allyHelpRequest == true)
+						{
+							debugEvent("MIL-COMMS", "resolved request from=" + fromID + " mode=defend building=" +
+								alliedBuildingID + " owner=" + playerToDefend + " base=" +
+								kbUnitGetBaseID(alliedBuildingID));
+						}
 						combatPlanID = aiPlanCreate("commHandler Defend Player " + playerToDefend, cPlanCombat);
+						if (combatPlanID < 0)
+						{
+							sendStatement(fromID, cAICommPromptToAllyDeclineGeneral);
+							debugEvent("MIL-INVARIANT", "commHandler failed to create requested ally-defense plan");
+							if (allyHelpRequest == true)
+							{
+								debugEvent("MIL-COMMS", "rejected player " + fromID +
+									": requested ally-defense plan creation failed");
+							}
+							break;
+						}
 						
 						aiPlanSetVariableInt(combatPlanID, cCombatPlanCombatType, 0, cCombatPlanCombatTypeDefend);
 						aiPlanSetVariableInt(combatPlanID, cCombatPlanTargetPlayerID, 0, playerToDefend);
@@ -1949,7 +2083,15 @@ void commHandler(int chatID = -1, int statementID = -1)
 						aiPlanSetOrphan(combatPlanID, true);
 
 						addUnitsToMilitaryPlan(combatPlanID);
+						registerTransientLandCombatMission(combatPlanID, cLandMissionSourceRequestedDefend);
 						aiPlanSetActive(combatPlanID);
+						debugEvent("MIL-MISSION", "created requested ally-defense plan " + combatPlanID +
+							" for player " + playerToDefend);
+						if (allyHelpRequest == true)
+						{
+							debugEvent("MIL-COMMS", "accepted player " + fromID + " with ally-defense plan " +
+								combatPlanID + " for player " + playerToDefend);
+						}
 						sendStatement(fromID, cAICommPromptToAllyIWillHelpDefend, location);
 						debugChats("Confirming defend request");
 					}
@@ -1961,6 +2103,11 @@ void commHandler(int chatID = -1, int statementID = -1)
 					// You must provide a premade army inside of the editor which the AI will then attack.
 					// This doesn't work yet, just deny.
 					sendStatement(fromID, cAICommPromptToAllyDeclineGeneral);
+					if (allyHelpRequest == true)
+					{
+						debugEvent("MIL-COMMS", "rejected player " + fromID +
+							": unit-target requests are unsupported");
+					}
 					break;
 				}
 			}

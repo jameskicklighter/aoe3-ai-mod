@@ -9,7 +9,8 @@ include "core/aiCore.xs";
 //==============================================================================
 void main(void)
 {
-	aiEcho("Main is starting.");
+	aiEcho("[BAI][SMOKE] Main");
+	preInit();
 
 	if (aiGetGameType() == cGameTypeCampaign)
 	{
@@ -138,4 +139,6 @@ void main(void)
 	xsEnableRule("checkForTownCenter");
 
 	xsEnableRule("modIntroChat");
+	postInit();
+	debugEvent("STARTUP", "main initialization complete; map=" + cRandomMapName);
 }

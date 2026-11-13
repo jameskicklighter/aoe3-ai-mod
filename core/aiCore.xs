@@ -48,6 +48,7 @@ mutable void selectMountainMonasteryBuildPlanPosition(int planID = -1) {}
 mutable void selectUniversityBuildPlanPosition(int planID = -1, vector position = cInvalidVector) {}
 mutable void selectClosestBuildPlanPosition(int planID = -1, int baseID = -1) {}
 mutable void selectBuildPlanPosition(int planID = -1, int puid = -1, vector position = cInvalidVector) {}
+mutable void traceBuildPlanCreated(int planID = -1, int puid = -1) {}
 mutable int findWagonToBuild(int puid = -1) { return(-1); }
 mutable int addMillBuildPlan(void) { return(-1); }
 mutable int addPlantationBuildPlan(void) { return(-1); }
@@ -67,6 +68,7 @@ mutable void setUnitPickerCommon(int upID = -1) {}
 mutable void setUnitPickerPreference(int upID = -1) {}
 mutable void endDefenseReflex(void) {}
 mutable void addUnitsToMilitaryPlan(int planID = -1) {}
+mutable void registerTransientLandCombatMission(int planID = -1, int source = -1) {}
 mutable float getMilitaryUnitStrength(int puid = -1) { return (0.0); }
 
 // Home City cards.
@@ -121,7 +123,7 @@ void setMilPopLimit(int age1 = 10, int age2 = 30, int age3 = 80, int age4 = 120,
 		}
 		case cAge2:
 		{
-			limit = 30;
+			limit = age2;
 			break;
 		}
 		case cAge3:
@@ -165,6 +167,10 @@ minInterval 15
 	int villBuildLimit = kbGetBuildLimit(cMyID, gEconUnit);
 	float villWorthRatio = 99.0 / villBuildLimit;
 	int economyPop = -1;
+	int currentPopAge = kbGetAge();
+	int appliedMilitaryPop = -1;
+	static int lastReportedPopAge = -1;
+	static int lastReportedMilitaryPop = -1;
 
 	if (cDifficultyCurrent <= cDifficultyEasy)
 		gLowDifficulty = true;
@@ -235,7 +241,25 @@ minInterval 15
 	if (aiTreatyGetEnd() > xsGetTime() + 8 * 60 * 1000)
 		aiSetMilitaryPop(0);
 
-	gGoodArmyPop = aiGetMilitaryPop() / 3;
+	appliedMilitaryPop = aiGetMilitaryPop();
+	if ((currentPopAge != lastReportedPopAge) ||
+		(appliedMilitaryPop != lastReportedMilitaryPop))
+	{
+		if (gBetterAIDebug >= 1)
+		{
+			debugEvent("POP-LIMIT",
+				"phase=apply age=" + currentPopAge +
+				" diff=" + cDifficultyCurrent +
+				" max=" + gMaxPop +
+				" econ=" + aiGetEconomyPop() +
+				" maxMil=" + maxMil +
+				" applied=" + appliedMilitaryPop);
+		}
+		lastReportedPopAge = currentPopAge;
+		lastReportedMilitaryPop = appliedMilitaryPop;
+	}
+
+	gGoodArmyPop = appliedMilitaryPop / 3;
 }
 
 
@@ -1201,7 +1225,7 @@ minInterval 5
 		}
 		xsEnableRule("islandExploreMonitor");
 
-		xsEnableRule("baseDefenseForce");
+		// baseDefenseForce remains available as legacy source, but defend0/defenseReflex own land defense units.
 
 		// Currently not working.
 		/* if (cMyCiv == cCivDEItalians)
@@ -1536,6 +1560,11 @@ minInterval 10
 //==============================================================================
 void selfAgeUpHandler(int age = -1)
 {
+	// Federal, Tribal, African, and ordinary politician availability can change
+	// after a transition. Keep the engine's legal-choice cache current for the
+	// next pass through ageUpgradeMonitor().
+	aiPopulatePoliticianList();
+
 	wagonMonitor();
 	if (kbResourceGet(cResourceShips) > 0)
 		shipGrantedHandler();
@@ -1608,6 +1637,15 @@ void buildingConstructedHandler(int buildingPUID = -1)
 			factoryTacticMonitor();
 			break;
 		}
+		case gDockUnit:
+		{
+			if (xsIsRuleEnabled("fishingBoatUpgradeMonitor") == false)
+			{
+				xsEnableRule("fishingBoatUpgradeMonitor");
+				fishingBoatUpgradeMonitor(); // Call it instantly.
+			}
+			break;
+		}
 		case cUnitTypedeGranary:
 		{
 			if (xsIsRuleEnabled("granaryUpgradeMonitor") == false)
@@ -1634,7 +1672,7 @@ void buildingConstructedHandler(int buildingPUID = -1)
 			if (civIsAsian() == false && civIsAfrican() == false && cMyCiv != cCivDEMexicans)
 			{	// Asians and Mexicans just use the prior rule since their buildings are the same.
 				// Africans research via the Granary.
-				if (xsIsRuleEnabled("millTypeUpgradeMonitor") == false)
+				if (xsIsRuleEnabled("plantationTypeUpgradeMonitor") == false)
 				{
 					xsEnableRule("plantationTypeUpgradeMonitor");
 					plantationTypeUpgradeMonitor(); // Call it instantly.
@@ -1839,7 +1877,7 @@ void buildingConstructedHandler(int buildingPUID = -1)
 
 
 rule testBasilica
-active
+inactive
 minInterval 30
 {
 	if (cMyCiv != cCivDEItalians)

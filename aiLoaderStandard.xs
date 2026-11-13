@@ -23,7 +23,7 @@ include "aiMain.xs";	// The bulk of the AI
 //==============================================================================
 void preInit(void)
 {
-	aiEcho("preInit() starting.");
+	aiEcho("[BAI][SMOKE] preInit");
 }
 
 
@@ -38,7 +38,7 @@ void preInit(void)
 //==============================================================================
 void postInit(void)
 {
-	aiEcho("postInit() starting.");
+	aiEcho("[BAI][SMOKE] postInit");
 }
 
 

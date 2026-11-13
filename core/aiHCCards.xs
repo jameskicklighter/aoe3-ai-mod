@@ -6,7 +6,7 @@ void addCardInfoToArrays(int cardTechID = -1, bool isMilitaryUnit = false,
 	int sentCount = 0)
 {
 	arrayPushInt(gCardList, cardTechID);
-	arrayPushBool(gCardListIsMilitaryUnit, isMilitaryUpgrade);
+	arrayPushBool(gCardListIsMilitaryUnit, isMilitaryUnit);
 	arrayPushBool(gCardListIsMilitaryUpgrade, isMilitaryUpgrade);
 	arrayPushBool(gCardListIsExtended, isExtended);
 	arrayPushInt(gCardListIndexInDeck, cardIndex);
@@ -86,7 +86,7 @@ void selectCards(void)
 			addCardInfoToArrays(cTechHCRoyalMint);
 			addCardInfoToArrays(cTechHCCheaperManors);
 			addCardInfoToArrays(cTechHCShipWoodCrates3);
-			addCardInfoToArrays(cTechHCShipSettlers4);
+			addCardInfoToArrays(cTechHCShipSettlers2);
 			addCardInfoToArrays(cTechHCShipCoinCrates3);
 			addCardInfoToArrays(cTechHCShipMusketeers1, true);
 			addCardInfoToArrays(cTechHCImprovedLongbows, false, true);
@@ -406,11 +406,11 @@ void selectCards(void)
 			addCardInfoToArrays(cTechHCUnlockFactory);
 			addCardInfoToArrays(cTechHCXPLandGrab);
 			addCardInfoToArrays(cTechHCShipFalconets3, true);
-			addCardInfoToArrays(cTechDEHCFedMXElBajio); // Federal Card
+			addCardInfoToArrays(cTechDEHCFedMXElBajio, false, false, true); // Federal Card
 			addCardInfoToArrays(cTechHCRefrigeration);
 			addCardInfoToArrays(cTechHCTextileMills);
-			addCardInfoToArrays(cTechDEHCFedMXTonalaCeramics); // Federal Card
-			addCardInfoToArrays(cTechDEHCFedMXOurLadyOfLight); // Federal Card
+			addCardInfoToArrays(cTechDEHCFedMXTonalaCeramics, false, false, true); // Federal Card
+			addCardInfoToArrays(cTechDEHCFedMXOurLadyOfLight, false, false, true); // Federal Card
 			addCardInfoToArrays(cTechDEHCAlhondigaDeGranaditas);
 			addCardInfoToArrays(cTechHCShipWoodCrates3);
 			addCardInfoToArrays(cTechHCShipSettlers4);
@@ -747,6 +747,7 @@ bool shouldSendCard(int cardTechID = -1)
 		case cTechHCShipCoinCrates3German:
 		case cTechypHCShipCoinCrates2:
 		case cTechYPHCShipCoinCrates2Indians:
+		case cTechHCShipSettlers2:
 		case cTechHCShipSettlers3:
 		case cTechHCShipSettlers4:
 		case cTechHCShipCoureurs2:
@@ -915,7 +916,7 @@ minInterval 10
 		{
 			if (kbGetAge() > ageReq && ageReq != -1 && ageReq < cAge4 &&
 				(kbTechCostPerResource(cardTechID, cResourceFood) +
-				 kbTechCostPerResource(cardTechID, cResourceFood) +
+				 kbTechCostPerResource(cardTechID, cResourceWood) +
 				 kbTechCostPerResource(cardTechID, cResourceGold) <= 0))
 				continue;
 		}

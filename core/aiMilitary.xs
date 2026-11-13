@@ -571,6 +571,657 @@ minInterval 10
 
 
 //==============================================================================
+// traceTransientLandCombatMission
+// Records one ordinary attack or ally-defense mission without changing its
+// targeting, reinforcement, retreat, or termination behavior.
+//==============================================================================
+bool landMissionUnitSampleArraysReady(void)
+{
+	return(
+		(gTracedLandMissionUnitIDs >= 0) &&
+		(gTracedLandMissionUnitOriginPlanIDs >= 0) &&
+		(gPostLandMissionUnitIDs >= 0) &&
+		(gPostLandMissionUnitOriginPlanIDs >= 0));
+}
+
+
+void clearTracedLandMissionUnitSamples(void)
+{
+	gTracedLandMissionUnitCount = 0;
+	gTracedLandMissionUnitCacheCapped = false;
+	gTracedLandMissionUnit0 = -1;
+	gTracedLandMissionUnit1 = -1;
+	if (landMissionUnitSampleArraysReady() == false)
+	{
+		return;
+	}
+
+	int sampleIndex = 0;
+	for (sampleIndex = 0; sampleIndex < cLandMissionUnitSampleCapacity; sampleIndex++)
+	{
+		xsArraySetInt(gTracedLandMissionUnitIDs, sampleIndex, -1);
+		xsArraySetInt(gTracedLandMissionUnitOriginPlanIDs, sampleIndex, -1);
+	}
+}
+
+
+void clearPostLandMissionUnitSamples(void)
+{
+	gPostLandMissionUnitCount = 0;
+	gPostLandMissionUnitCacheCapped = false;
+	gPostLandMissionUnit0 = -1;
+	gPostLandMissionUnit1 = -1;
+	if (landMissionUnitSampleArraysReady() == false)
+	{
+		return;
+	}
+
+	int sampleIndex = 0;
+	for (sampleIndex = 0; sampleIndex < cLandMissionUnitSampleCapacity; sampleIndex++)
+	{
+		xsArraySetInt(gPostLandMissionUnitIDs, sampleIndex, -1);
+		xsArraySetInt(gPostLandMissionUnitOriginPlanIDs, sampleIndex, -1);
+	}
+}
+
+
+bool addTracedLandMissionUnitSample(int unitID = -1, int originPlanID = -1)
+{
+	if ((unitID < 0) || (landMissionUnitSampleArraysReady() == false))
+	{
+		return(false);
+	}
+
+	int sampleIndex = 0;
+	for (sampleIndex = 0; sampleIndex < gTracedLandMissionUnitCount; sampleIndex++)
+	{
+		if (xsArrayGetInt(gTracedLandMissionUnitIDs, sampleIndex) == unitID)
+		{
+			// Prefer the immediate child as the most specific live origin.
+			if (originPlanID != gTracedLandMissionPlanID)
+			{
+				xsArraySetInt(gTracedLandMissionUnitOriginPlanIDs, sampleIndex,
+					originPlanID);
+			}
+			return(true);
+		}
+	}
+
+	if (gTracedLandMissionUnitCount >= cLandMissionUnitSampleCapacity)
+	{
+		gTracedLandMissionUnitCacheCapped = true;
+		return(false);
+	}
+
+	xsArraySetInt(gTracedLandMissionUnitIDs, gTracedLandMissionUnitCount, unitID);
+	xsArraySetInt(gTracedLandMissionUnitOriginPlanIDs, gTracedLandMissionUnitCount,
+		originPlanID);
+	gTracedLandMissionUnitCount++;
+	if (gTracedLandMissionUnitCount == 1)
+	{
+		gTracedLandMissionUnit0 = unitID;
+	}
+	else if (gTracedLandMissionUnitCount == 2)
+	{
+		gTracedLandMissionUnit1 = unitID;
+	}
+	return(true);
+}
+
+
+bool addPostLandMissionUnitSample(int unitID = -1, int originPlanID = -1)
+{
+	if ((unitID < 0) || (landMissionUnitSampleArraysReady() == false))
+	{
+		return(false);
+	}
+
+	int sampleIndex = 0;
+	for (sampleIndex = 0; sampleIndex < gPostLandMissionUnitCount; sampleIndex++)
+	{
+		if (xsArrayGetInt(gPostLandMissionUnitIDs, sampleIndex) == unitID)
+		{
+			xsArraySetInt(gPostLandMissionUnitOriginPlanIDs, sampleIndex, originPlanID);
+			return(true);
+		}
+	}
+
+	if (gPostLandMissionUnitCount >= cLandMissionUnitSampleCapacity)
+	{
+		gPostLandMissionUnitCacheCapped = true;
+		return(false);
+	}
+
+	xsArraySetInt(gPostLandMissionUnitIDs, gPostLandMissionUnitCount, unitID);
+	xsArraySetInt(gPostLandMissionUnitOriginPlanIDs, gPostLandMissionUnitCount,
+		originPlanID);
+	gPostLandMissionUnitCount++;
+	if (gPostLandMissionUnitCount == 1)
+	{
+		gPostLandMissionUnit0 = unitID;
+	}
+	else if (gPostLandMissionUnitCount == 2)
+	{
+		gPostLandMissionUnit1 = unitID;
+	}
+	return(true);
+}
+
+
+void copyTracedLandMissionUnitSamplesToPost(void)
+{
+	clearPostLandMissionUnitSamples();
+	if (landMissionUnitSampleArraysReady() == false)
+	{
+		return;
+	}
+
+	int sampleIndex = 0;
+	int unitID = -1;
+	int originPlanID = -1;
+	for (sampleIndex = 0; sampleIndex < gTracedLandMissionUnitCount; sampleIndex++)
+	{
+		unitID = xsArrayGetInt(gTracedLandMissionUnitIDs, sampleIndex);
+		originPlanID = xsArrayGetInt(gTracedLandMissionUnitOriginPlanIDs, sampleIndex);
+		addPostLandMissionUnitSample(unitID, originPlanID);
+	}
+	gPostLandMissionUnitCacheCapped = gTracedLandMissionUnitCacheCapped;
+}
+
+
+void cacheTransientLandMissionState(int planID = -1)
+{
+	static bool sampleArrayFailureReported = false;
+	int parentUnitCount = 0;
+	int parentPrimaryCount = 0;
+	int parentUnitIndex = 0;
+	int activePlanCount = 0;
+	int activeIndex = 0;
+	int childPlanID = -1;
+	int childUnitCount = 0;
+	int childUnitIndex = 0;
+	int unitID = -1;
+	if ((planID < 0) || (planID != gTracedLandMissionPlanID) || (aiPlanGetState(planID) < 0))
+	{
+		return;
+	}
+
+	clearTracedLandMissionUnitSamples();
+	if (landMissionUnitSampleArraysReady() == false)
+	{
+		if (sampleArrayFailureReported == false)
+		{
+			debugEvent("MIL-INVARIANT", "land mission sample arrays unavailable");
+			sampleArrayFailureReported = true;
+		}
+		return;
+	}
+
+	parentUnitCount = aiPlanGetNumberUnits(planID, cUnitTypeUnit, true);
+	parentPrimaryCount = parentUnitCount;
+	activePlanCount = aiPlanGetActiveCount();
+	if (parentPrimaryCount > cLandMissionParentUnitSampleLimit)
+	{
+		parentPrimaryCount = cLandMissionParentUnitSampleLimit;
+	}
+
+	// Reserve two slots for engine child-plan members when the parent is large.
+	for (parentUnitIndex = 0; parentUnitIndex < parentPrimaryCount; parentUnitIndex++)
+	{
+		unitID = aiPlanGetUnitByIndex(planID, parentUnitIndex);
+		addTracedLandMissionUnitSample(unitID, planID);
+	}
+
+	for (activeIndex = 0; activeIndex < activePlanCount; activeIndex++)
+	{
+		childPlanID = aiPlanGetIDByActiveIndex(activeIndex);
+		if ((childPlanID < 0) || (aiPlanGetParentID(childPlanID) != planID))
+		{
+			continue;
+		}
+		childUnitCount = aiPlanGetNumberUnits(childPlanID, cUnitTypeUnit, true);
+		for (childUnitIndex = 0; childUnitIndex < childUnitCount; childUnitIndex++)
+		{
+			unitID = aiPlanGetUnitByIndex(childPlanID, childUnitIndex);
+			addTracedLandMissionUnitSample(unitID, childPlanID);
+			if (gTracedLandMissionUnitCacheCapped == true)
+			{
+				break;
+			}
+		}
+		if (gTracedLandMissionUnitCacheCapped == true)
+		{
+			break;
+		}
+	}
+
+	// Use any slots not needed by children for additional parent members.
+	for (parentUnitIndex = parentPrimaryCount;
+		parentUnitIndex < parentUnitCount;
+		parentUnitIndex++)
+	{
+		unitID = aiPlanGetUnitByIndex(planID, parentUnitIndex);
+		addTracedLandMissionUnitSample(unitID, planID);
+		if (gTracedLandMissionUnitCacheCapped == true)
+		{
+			break;
+		}
+	}
+	gTracedLandMissionTargetPoint = aiPlanGetVariableVector(planID, cCombatPlanTargetPoint, 0);
+	gTracedLandMissionGatherPoint = aiPlanGetVariableVector(planID, cCombatPlanGatherPoint, 0);
+}
+
+
+string classifyPostLandMissionUnit(int unitID = -1, int currentPlanID = -1, int parentPlanID = -1)
+{
+	if ((unitID < 0) || (kbUnitGetPlayerID(unitID) != cMyID))
+	{
+		return("gone");
+	}
+	if (currentPlanID < 0)
+	{
+		return("idle");
+	}
+	if ((currentPlanID == gLandDefendPlan0) || (parentPlanID == gLandDefendPlan0))
+	{
+		return("defend");
+	}
+	if ((currentPlanID == gLandReservePlan) || (parentPlanID == gLandReservePlan))
+	{
+		return("reserve");
+	}
+	if ((currentPlanID == gTracedLandMissionPlanID) || (parentPlanID == gTracedLandMissionPlanID))
+	{
+		return("new-mission");
+	}
+	return("other");
+}
+
+
+void tracePostLandMissionUnit(int unitID = -1, int originPlanID = -1)
+{
+	if (unitID < 0)
+	{
+		return;
+	}
+
+	int ownerID = kbUnitGetPlayerID(unitID);
+	int currentPlanID = -1;
+	int parentPlanID = -1;
+	int actionID = -1;
+	int targetID = -1;
+	vector unitPosition = cInvalidVector;
+	if (ownerID == cMyID)
+	{
+		currentPlanID = kbUnitGetPlanID(unitID);
+		if (currentPlanID >= 0)
+		{
+			parentPlanID = aiPlanGetParentID(currentPlanID);
+		}
+		actionID = kbUnitGetActionType(unitID);
+		targetID = kbUnitGetTargetUnitID(unitID);
+		unitPosition = kbUnitGetPosition(unitID);
+	}
+
+	vector homeGatherPoint = kbBaseGetMilitaryGatherPoint(cMyID, kbBaseGetMainID(cMyID));
+	float targetDistance = -1.0;
+	float homeDistance = -1.0;
+	if (unitPosition != cInvalidVector)
+	{
+		if (gPostLandMissionTargetPoint != cInvalidVector)
+		{
+			targetDistance = getDistance(unitPosition, gPostLandMissionTargetPoint);
+		}
+		if (homeGatherPoint != cInvalidVector)
+		{
+			homeDistance = getDistance(unitPosition, homeGatherPoint);
+		}
+	}
+
+	debugEvent("MIL-PLAN", "phase=post-state id=" + gPostLandMissionPlanID + " src=" +
+		gPostLandMissionSource + " u=" + unitID + " origin=" + originPlanID +
+		" owner=" + ownerID + " plan=" + currentPlanID + " parent=" + parentPlanID + " class=" +
+		classifyPostLandMissionUnit(unitID, currentPlanID, parentPlanID) + " action=" +
+		actionID + " target=" + targetID);
+	debugEvent("MIL-PLAN", "phase=post-pos id=" + gPostLandMissionPlanID + " u=" +
+		unitID + " dT=" + targetDistance + " dH=" + homeDistance + " pos=" +
+		unitPosition);
+}
+
+
+void startPostLandMissionFollow(int planID = -1, int source = -1, string reason = "terminal")
+{
+	if (planID < 0)
+	{
+		return;
+	}
+
+	int now = xsGetTime();
+	if ((gPostLandMissionPlanID == planID) && (now <= gPostLandMissionUntilTime))
+	{
+		return;
+	}
+	if ((gPostLandMissionPlanID >= 0) && (now <= gPostLandMissionUntilTime))
+	{
+		debugEvent("MIL-INVARIANT", "post-follow busy old=" + gPostLandMissionPlanID +
+			" dropped=" + planID);
+		return;
+	}
+
+	int followedUnit0 = -1;
+	int followedUnit1 = -1;
+	int liveUnitCount = 0;
+	int liveUnitIndex = 0;
+	int liveUnitID = -1;
+	vector targetPoint = cInvalidVector;
+	vector gatherPoint = cInvalidVector;
+	clearPostLandMissionUnitSamples();
+	if (aiPlanGetState(planID) >= 0)
+	{
+		if (planID == gTracedLandMissionPlanID)
+		{
+			cacheTransientLandMissionState(planID);
+			copyTracedLandMissionUnitSamplesToPost();
+		}
+		else
+		{
+			// A concurrently untraced live mission has no child cache, but retain a
+			// bounded parent sample instead of dropping all unit evidence.
+			liveUnitCount = aiPlanGetNumberUnits(planID, cUnitTypeUnit, true);
+			for (liveUnitIndex = 0;
+				liveUnitIndex < liveUnitCount;
+				liveUnitIndex++)
+			{
+				liveUnitID = aiPlanGetUnitByIndex(planID, liveUnitIndex);
+				addPostLandMissionUnitSample(liveUnitID, planID);
+				if (gPostLandMissionUnitCacheCapped == true)
+				{
+					break;
+				}
+			}
+		}
+		targetPoint = aiPlanGetVariableVector(planID, cCombatPlanTargetPoint, 0);
+		gatherPoint = aiPlanGetVariableVector(planID, cCombatPlanGatherPoint, 0);
+	}
+	else if (planID == gTracedLandMissionPlanID)
+	{
+		copyTracedLandMissionUnitSamplesToPost();
+		targetPoint = gTracedLandMissionTargetPoint;
+		gatherPoint = gTracedLandMissionGatherPoint;
+	}
+	followedUnit0 = gPostLandMissionUnit0;
+	followedUnit1 = gPostLandMissionUnit1;
+
+	gPostLandMissionPlanID = planID;
+	gPostLandMissionSource = source;
+	gPostLandMissionTargetPoint = targetPoint;
+	gPostLandMissionGatherPoint = gatherPoint;
+	gPostLandMissionUntilTime = now + 30000;
+	gPostLandMissionNextSampleTime = now;
+	debugEvent("MIL-PLAN", "phase=post-start id=" + planID + " src=" + source +
+		" reason=" + reason + " samples=" + gPostLandMissionUnitCount + " capped=" +
+		gPostLandMissionUnitCacheCapped + " u0=" + followedUnit0 + " u1=" + followedUnit1);
+	xsEnableRule("postLandMissionFollowMonitor");
+}
+
+
+void traceTransientLandCombatMission(int planID = -1, string phase = "snapshot")
+{
+	int planState = aiPlanGetState(planID);
+	if (planState < 0)
+	{
+		debugEvent("MIL-PLAN", "phase=" + phase + " id=" + planID + " state=" + planState + " terminal=1");
+		return;
+	}
+
+	cacheTransientLandMissionState(planID);
+	int missionSource = -1;
+	if (planID == gTracedLandMissionPlanID)
+	{
+		missionSource = gTracedLandMissionSource;
+	}
+	int combatType = aiPlanGetVariableInt(planID, cCombatPlanCombatType, 0);
+	int directUnits = aiPlanGetNumberUnits(planID, cUnitTypeLogicalTypeLandMilitary, false);
+	int unitsWithLoans = aiPlanGetNumberUnits(planID, cUnitTypeLogicalTypeLandMilitary, true);
+	int loanedUnits = unitsWithLoans - directUnits;
+	int childCount = 0;
+	int activePlanCount = aiPlanGetActiveCount();
+	int childPlanID = -1;
+	for (int activeIndex = 0; activeIndex < activePlanCount; activeIndex++)
+	{
+		childPlanID = aiPlanGetIDByActiveIndex(activeIndex);
+		if (childPlanID >= 0 && aiPlanGetParentID(childPlanID) == planID)
+		{
+			childCount++;
+			if (childCount <= 2)
+			{
+				debugEvent("MIL-PLAN", "phase=child id=" + planID + " child=" + childPlanID +
+					" type=" + aiPlanGetType(childPlanID) + " state=" + aiPlanGetState(childPlanID) +
+					" units=" + aiPlanGetNumberUnits(childPlanID, cUnitTypeUnit, true));
+			}
+		}
+	}
+
+	debugEvent("MIL-PLAN", "phase=" + phase + " id=" + planID + " src=" + missionSource +
+		" state=" + planState + " active=" + aiPlanGetActive(planID) + " orphan=" +
+		aiPlanGetOrphan(planID) + " parent=" + aiPlanGetParentID(planID) + " combat=" + combatType);
+	debugEvent("MIL-PLAN", "phase=target id=" + planID + " mode=" +
+		aiPlanGetVariableInt(planID, cCombatPlanTargetMode, 0) + " player=" +
+		aiPlanGetVariableInt(planID, cCombatPlanTargetPlayerID, 0) + " base=" +
+		aiPlanGetVariableInt(planID, cCombatPlanTargetBaseID, 0) + " done=" +
+		aiPlanGetVariableInt(planID, cCombatPlanDoneMode, 0) + " retreat=" +
+		aiPlanGetVariableInt(planID, cCombatPlanRetreatMode, 0));
+	debugEvent("MIL-PLAN", "phase=units id=" + planID + " assigned=" + directUnits + " loans=" +
+		loanedUnits + " need=" + aiPlanGetNumberNeededUnits(planID, cUnitTypeLogicalTypeLandMilitary) +
+		" want=" + aiPlanGetNumberWantedUnits(planID, cUnitTypeLogicalTypeLandMilitary) + " max=" +
+		aiPlanGetNumberMaxUnits(planID, cUnitTypeLogicalTypeLandMilitary) + " children=" + childCount);
+	debugEvent("MIL-PLAN", "phase=cache id=" + planID + " samples=" +
+		gTracedLandMissionUnitCount + " capped=" + gTracedLandMissionUnitCacheCapped);
+
+	vector targetPoint = aiPlanGetVariableVector(planID, cCombatPlanTargetPoint, 0);
+	vector gatherPoint = aiPlanGetVariableVector(planID, cCombatPlanGatherPoint, 0);
+	debugEvent("MIL-PLAN", "phase=position id=" + planID + " target=" + targetPoint + " gather=" +
+		gatherPoint + " initial=" + aiPlanGetInitialPosition(planID) + " planBase=" +
+		aiPlanGetBaseID(planID) + " inCombat=" +
+		aiPlanGetVariableBool(planID, cCombatPlanInCombat, 0));
+
+	int unitCount = aiPlanGetNumberUnits(planID, cUnitTypeUnit, true);
+	if (unitCount > 2)
+	{
+		unitCount = 2;
+	}
+	for (int unitIndex = 0; unitIndex < unitCount; unitIndex++)
+	{
+		int unitID = aiPlanGetUnitByIndex(planID, unitIndex);
+		if (unitID < 0)
+		{
+			continue;
+		}
+		vector unitPosition = kbUnitGetPosition(unitID);
+		debugEvent("MIL-PLAN", "phase=unit id=" + planID + " sample=" + unitIndex + " unit=" + unitID +
+			" plan=" + kbUnitGetPlanID(unitID) + " action=" + kbUnitGetActionType(unitID) +
+			" target=" + kbUnitGetTargetUnitID(unitID) + " pos=" + unitPosition +
+			" gatherDist=" + getDistance(unitPosition, gatherPoint));
+	}
+}
+
+
+void registerTransientLandCombatMission(int planID = -1, int source = -1)
+{
+	if (gBetterAIDebug < 1)
+		return;
+	if (planID < 0)
+	{
+		debugEvent("MIL-INVARIANT", "attempted to register invalid transient land mission " + planID);
+		return;
+	}
+	if (gTracedLandMissionPlanID >= 0 && gTracedLandMissionPlanID != planID &&
+		aiPlanGetState(gTracedLandMissionPlanID) >= 0)
+	{
+		debugEvent("MIL-INVARIANT", "replacing live traced mission old=" + gTracedLandMissionPlanID +
+			" new=" + planID);
+	}
+	gTracedLandMissionPlanID = planID;
+	gTracedLandMissionSource = source;
+	gTracedLandMissionNextSnapshotTime = xsGetTime() + 15000;
+	clearTracedLandMissionUnitSamples();
+	gTracedLandMissionTargetPoint = cInvalidVector;
+	gTracedLandMissionGatherPoint = cInvalidVector;
+	aiPlanSetEventHandler(planID, cPlanEventStateChange, "transientLandMissionHandler");
+	xsEnableRule("transientLandMissionMonitor");
+	traceTransientLandCombatMission(planID, "create");
+}
+
+
+void traceTransientLandMissionCancellation(int planID = -1, string reason = "script")
+{
+	if (gBetterAIDebug < 1)
+		return;
+	if (planID >= 0 && aiPlanGetState(planID) >= 0)
+	{
+		int missionSource = -1;
+		if (planID == gTracedLandMissionPlanID)
+		{
+			missionSource = gTracedLandMissionSource;
+		}
+		cacheTransientLandMissionState(planID);
+		debugEvent("MIL-PLAN", "phase=cancel id=" + planID + " src=" +
+			missionSource + " reason=" + reason + " parent=" + aiPlanGetParentID(planID));
+		traceTransientLandCombatMission(planID, "cancel-snapshot");
+		startPostLandMissionFollow(planID, missionSource, reason);
+	}
+}
+
+
+void transientLandMissionHandler(int planID = -1)
+{
+	if (gBetterAIDebug < 1)
+		return;
+	int planState = aiPlanGetState(planID);
+	int missionSource = -1;
+	if (planID == gTracedLandMissionPlanID)
+	{
+		missionSource = gTracedLandMissionSource;
+	}
+	if (planState < 0)
+	{
+		debugEvent("MIL-PLAN", "phase=terminate id=" + planID + " src=" +
+			missionSource + " state=" + planState);
+		startPostLandMissionFollow(planID, missionSource, "engine-terminal");
+		if (planID == gTracedLandMissionPlanID)
+		{
+			gTracedLandMissionPlanID = -1;
+			gTracedLandMissionSource = -1;
+			gTracedLandMissionNextSnapshotTime = -1;
+			clearTracedLandMissionUnitSamples();
+			gTracedLandMissionTargetPoint = cInvalidVector;
+			gTracedLandMissionGatherPoint = cInvalidVector;
+		}
+		return;
+	}
+	cacheTransientLandMissionState(planID);
+	debugEvent("MIL-PLAN", "phase=state-change id=" + planID + " src=" +
+		missionSource + " state=" + planState + " active=" +
+		aiPlanGetActive(planID) + " inCombat=" +
+		aiPlanGetVariableBool(planID, cCombatPlanInCombat, 0));
+	if (planID == gTracedLandMissionPlanID &&
+		xsGetTime() >= gTracedLandMissionNextSnapshotTime)
+	{
+		traceTransientLandCombatMission(planID, "state-snapshot");
+		gTracedLandMissionNextSnapshotTime = xsGetTime() + 15000;
+	}
+}
+
+
+rule transientLandMissionMonitor
+inactive
+minInterval 5
+{
+	if (gBetterAIDebug < 1)
+	{
+		xsDisableSelf();
+		return;
+	}
+	if (gTracedLandMissionPlanID < 0)
+	{
+		xsDisableSelf();
+		return;
+	}
+	if (aiPlanGetState(gTracedLandMissionPlanID) < 0)
+	{
+		debugEvent("MIL-PLAN", "phase=monitor-terminal id=" + gTracedLandMissionPlanID +
+			" src=" + gTracedLandMissionSource);
+		startPostLandMissionFollow(gTracedLandMissionPlanID, gTracedLandMissionSource,
+			"monitor-terminal");
+		gTracedLandMissionPlanID = -1;
+		gTracedLandMissionSource = -1;
+		gTracedLandMissionNextSnapshotTime = -1;
+		clearTracedLandMissionUnitSamples();
+		gTracedLandMissionTargetPoint = cInvalidVector;
+		gTracedLandMissionGatherPoint = cInvalidVector;
+		xsDisableSelf();
+		return;
+	}
+	cacheTransientLandMissionState(gTracedLandMissionPlanID);
+	if (xsGetTime() >= gTracedLandMissionNextSnapshotTime)
+	{
+		traceTransientLandCombatMission(gTracedLandMissionPlanID, "heartbeat");
+		gTracedLandMissionNextSnapshotTime = xsGetTime() + 15000;
+	}
+}
+
+
+rule postLandMissionFollowMonitor
+inactive
+minInterval 2
+{
+	if (gBetterAIDebug < 1)
+	{
+		xsDisableSelf();
+		return;
+	}
+	if (gPostLandMissionPlanID < 0)
+	{
+		xsDisableSelf();
+		return;
+	}
+
+	int now = xsGetTime();
+	int sampleIndex = 0;
+	int unitID = -1;
+	int originPlanID = -1;
+	if (now < gPostLandMissionNextSampleTime)
+	{
+		return;
+	}
+
+	for (sampleIndex = 0; sampleIndex < gPostLandMissionUnitCount; sampleIndex++)
+	{
+		unitID = xsArrayGetInt(gPostLandMissionUnitIDs, sampleIndex);
+		originPlanID = xsArrayGetInt(gPostLandMissionUnitOriginPlanIDs, sampleIndex);
+		tracePostLandMissionUnit(unitID, originPlanID);
+	}
+	gPostLandMissionNextSampleTime = now + 10000;
+
+	if (now >= gPostLandMissionUntilTime)
+	{
+		debugEvent("MIL-PLAN", "phase=post-end id=" + gPostLandMissionPlanID +
+			" src=" + gPostLandMissionSource + " samples=" + gPostLandMissionUnitCount +
+			" capped=" + gPostLandMissionUnitCacheCapped + " u0=" +
+			gPostLandMissionUnit0 + " u1=" + gPostLandMissionUnit1);
+		gPostLandMissionPlanID = -1;
+		gPostLandMissionSource = -1;
+		clearPostLandMissionUnitSamples();
+		gPostLandMissionTargetPoint = cInvalidVector;
+		gPostLandMissionGatherPoint = cInvalidVector;
+		gPostLandMissionUntilTime = -1;
+		gPostLandMissionNextSampleTime = -1;
+		xsDisableSelf();
+	}
+}
+
+
+//==============================================================================
 // attackManager
 // This rule analyzes the current situation in the game and decides if we should 
 // attack an enemy OR defend an ally in need.
@@ -580,16 +1231,74 @@ inactive
 minInterval 15
 {
 	int mainBaseID = kbBaseGetMainID(cMyID);
+	static int currentPlayer = -1;
+	static int currentBaseIndex = -1;
+	static int targetBaseID = -1;
+	static vector targetBaseLocation = cInvalidVector;
+	static int targetPlayer = 2;
+	static bool targetIsEnemy = true;
+	static bool targetShouldAttack = false;
+	static float targetAffordable = 0.0;
+	static float targetBaseAssets = 0.0;
+	static float targetDistancePenalty = 0.0;
+	static float targetScore = 0.0;
+	static float maxBaseAssets = 100.0;
+
+	bool treatyBlocked = aiTreatyActive();
+	bool attacksDisabled = (cvOkToAttack == false);
+	bool mainBaseDefenseBlocked = (gDefenseReflexBaseID == mainBaseID);
+	float ageUpPriority = -1.0;
+	if (gAgeUpResearchPlan >= 0)
+	{
+		ageUpPriority = aiPlanGetActualResourcePriority(gAgeUpResearchPlan);
+	}
+	bool ageUpBlocked = (ageUpPriority >= 52.0);
+	bool missionBlocked = isDefendingOrAttacking();
 
 	// Don't attack under treaty or main base is under attack or we want to focus on aging up or if we already have an attack /
 	// "real" defend plan.
-	if (aiTreatyActive() == true || gDefenseReflexBaseID == mainBaseID || /* aiPlanGetActualResourcePriority(gAgeUpResearchPlan) >= 52 || */
-		isDefendingOrAttacking() == true)	// TODO (James): Test the difference between "actual" and standard resource prio.
+	if (treatyBlocked == true || attacksDisabled == true || mainBaseDefenseBlocked == true ||
+		ageUpBlocked == true || missionBlocked == true)
 	{
 		debugMilitary("Quiting attackManager early because we're not allowed to make a plan");
 		debugMilitary("gDefenseReflexBaseID: " + gDefenseReflexBaseID + ", mainBaseID: " + mainBaseID);
-		debugMilitary("gAgeUpResearchPlan prio: " + aiPlanGetActualResourcePriority(gAgeUpResearchPlan));
-		debugMilitary("isDefendingOrAttacking: " + isDefendingOrAttacking());
+		debugMilitary("gAgeUpResearchPlan prio: " + ageUpPriority);
+		debugMilitary("isDefendingOrAttacking: " + missionBlocked);
+		if (currentPlayer >= 0 || currentBaseIndex >= 0)
+		{
+			string interruptReason = "existing mission";
+			if (treatyBlocked == true)
+			{
+				interruptReason = "treaty";
+			}
+			else if (attacksDisabled == true)
+			{
+				interruptReason = "attacks disabled";
+			}
+			else if (mainBaseDefenseBlocked == true)
+			{
+				interruptReason = "main-base defense reflex";
+			}
+			else if (ageUpBlocked == true)
+			{
+				interruptReason = "age-up priority";
+			}
+			debugEvent("MIL-SCAN", "interrupted: " + interruptReason);
+		}
+
+		currentPlayer = -1;
+		currentBaseIndex = -1;
+		targetBaseID = -1;
+		targetBaseLocation = cInvalidVector;
+		targetPlayer = 2;
+		targetIsEnemy = true;
+		targetShouldAttack = false;
+		targetAffordable = 0.0;
+		targetBaseAssets = 0.0;
+		targetDistancePenalty = 0.0;
+		targetScore = 0.0;
+		maxBaseAssets = 100.0;
+		xsSetRuleMinIntervalSelf(15);
 		return;
 	}
 
@@ -628,22 +1337,15 @@ minInterval 15
 	int unitID = -1;
 	int puid = -1;
 	float unitPower = 0.0;
-	int targetBaseID = -1;
-	vector targetBaseLocation = cInvalidVector;
-	int targetPlayer = 2;
-	bool targetIsEnemy = true;
-	bool targetShouldAttack = false;
-	float targetAffordable = 0.0;
-	float targetBaseAssets = 0.0;
-	float targetDistancePenalty = 0.0;
-	float targetScore = 0.0;
-	float maxBaseAssets = 100.0;
 	int planID = -1;
 	int difficulty = cDifficultyCurrent;
 	bool isItalianWars = (cRandomMapName == "euItalianWars");
+	bool isNorthernWars = (cRandomMapName == "eugreatnorthernwar");
 	int cityStateQuery = -1;
+	int crateFlagQuery = -1;
 	bool isCityState = false;
 	int numberControlledCityStates = 0;
+	int numberBasesProcessed = 0;
 
 	if (baseQuery < 0)
 	{
@@ -702,6 +1404,39 @@ minInterval 15
 			attackingKOTH = true;  // We're attacking, focus on the hill
 	}
 
+	bool reservePlanReady = true;
+	if (gLandReservePlan < 0)
+	{
+		reservePlanReady = false;
+	}
+	else if ((aiPlanGetState(gLandReservePlan) < 0) ||
+		(aiPlanGetActive(gLandReservePlan) == false))
+	{
+		reservePlanReady = false;
+	}
+	if (reservePlanReady == false)
+	{
+		if (currentPlayer >= 0 || currentBaseIndex >= 0)
+		{
+			debugEvent("MIL-SCAN", "interrupted: missing land reserve plan");
+		}
+		debugEvent("MIL-INVARIANT", "attack scan abandoned: land reserve plan is missing");
+		currentPlayer = -1;
+		currentBaseIndex = -1;
+		targetBaseID = -1;
+		targetBaseLocation = cInvalidVector;
+		targetPlayer = 2;
+		targetIsEnemy = true;
+		targetShouldAttack = false;
+		targetAffordable = 0.0;
+		targetBaseAssets = 0.0;
+		targetDistancePenalty = 0.0;
+		targetScore = 0.0;
+		maxBaseAssets = 100.0;
+		xsSetRuleMinIntervalSelf(15);
+		return;
+	}
+
 	numberUnits = aiPlanGetNumberUnits(gLandReservePlan, cUnitTypeLogicalTypeLandMilitary);
 
 	for (i = 0; < numberUnits)
@@ -711,27 +1446,75 @@ minInterval 15
 		armyPower = armyPower + getMilitaryUnitStrength(puid);
 	}
 
+	// A negative cursor starts a fresh scan and clears every accumulated target field.
+	if (currentPlayer < 0 || currentBaseIndex < 0)
+	{
+		targetBaseID = -1;
+		targetBaseLocation = cInvalidVector;
+		targetPlayer = 2;
+		targetIsEnemy = true;
+		targetShouldAttack = false;
+		targetAffordable = 0.0;
+		targetBaseAssets = 0.0;
+		targetDistancePenalty = 0.0;
+		targetScore = 0.0;
+		maxBaseAssets = 100.0;
+		currentPlayer = 0;
+		currentBaseIndex = 0;
+	}
+
 	// Go through all players' bases and calculate values for comparison.
-	for (player = 0; < cNumberPlayers)
+	for (player = currentPlayer; < cNumberPlayers)
 	{
 		cityStateQuery = -1;
+		crateFlagQuery = -1;
 
 		if (player == 0)
 		{
 			if (isItalianWars == true)
 			{
 				cityStateQuery = createSimpleUnitQuery(cUnitTypedeSPCSocketCityState, 0, cUnitStateAny);
+				if (cityStateQuery < 0)
+				{
+					currentBaseIndex = 0;
+					debugEvent("MIL-INVARIANT", "attack scan: failed to create Gaia city-state query");
+					continue;
+				}
+			}
+			else if (isNorthernWars == true)
+			{
+				// This pseudo-base query belongs exclusively to the Gaia iteration.
+				crateFlagQuery = createSimpleUnitQuery(cUnitTypedeSPCCrateFlag, 0, cUnitStateAny);
+				if (crateFlagQuery < 0)
+				{
+					currentBaseIndex = 0;
+					debugEvent("MIL-INVARIANT", "attack scan: failed to create Gaia crate-objective query");
+					continue;
+				}
 			}
 			else
 			{
+				currentBaseIndex = 0;
 				continue;
 			}
 		}
 
-		if (cityStateQuery < 0)
+		if (cityStateQuery >= 0)
+		{
+			numberBases = kbUnitQueryExecute(cityStateQuery);
+			isEnemy = true;
+		}
+		else if (crateFlagQuery >= 0)
+		{
+			// Creation, execution, and result access all remain inside player 0.
+			numberBases = kbUnitQueryExecute(crateFlagQuery);
+			isEnemy = true;
+		}
+		else
 		{
 			if (player == cMyID || kbHasPlayerLost(player) == true)
 			{
+				currentBaseIndex = 0;
 				continue;
 			}
 
@@ -741,31 +1524,46 @@ minInterval 15
 
 			if (isEnemy == true && (cvPlayerToAttack > 0 && cvPlayerToAttack != player && kbHasPlayerLost(cvPlayerToAttack) == false))
 			{
+				currentBaseIndex = 0;
 				continue;
 			}
 		}
-		else
-		{
-			numberBases = kbUnitQueryExecute(cityStateQuery);
-			isEnemy = true;
-		}
 
-		for (baseIndex = 0; < numberBases)
+		for (baseIndex = currentBaseIndex; < numberBases)
 		{
 			int cityStateID = -1;
+			int crateFlagID = -1;
 
-			if (cityStateQuery < 0)
+			// Bound each invocation even when a candidate is later skipped.
+			if (numberBasesProcessed >= 2)
 			{
-				baseID = kbBaseGetIDByIndex(player, baseIndex);
-				baseLocation = kbBaseGetLocation(player, baseID);
-				baseDistance = kbBaseGetDistance(player, baseID);
+				currentPlayer = player;
+				currentBaseIndex = baseIndex;
+				xsSetRuleMinIntervalSelf(1);
+				debugMilitary("attackManager: splitting base scan across updates");
+				return;
 			}
-			else // city state, treat the gaia controlled city state as an enemy base.
+			numberBasesProcessed++;
+
+			if (cityStateQuery >= 0) // City state, treat the Gaia-controlled socket as an enemy base.
 			{
 				baseID = -1;
 				cityStateID = kbUnitQueryGetResult(cityStateQuery, baseIndex);
 				baseLocation = kbUnitGetPosition(cityStateID);
 				baseDistance = 30.0;
+			}
+			else if (crateFlagQuery >= 0)
+			{
+				baseID = -1;
+				crateFlagID = kbUnitQueryGetResult(crateFlagQuery, baseIndex);
+				baseLocation = kbUnitGetPosition(crateFlagID);
+				baseDistance = 20.0;
+			}
+			else
+			{
+				baseID = kbBaseGetIDByIndex(player, baseIndex);
+				baseLocation = kbBaseGetLocation(player, baseID);
+				baseDistance = kbBaseGetDistance(player, baseID);
 			}
 
 			kbUnitQuerySetPlayerID(baseQuery, player);
@@ -773,15 +1571,35 @@ minInterval 15
 			kbUnitQuerySetPosition(baseQuery, baseLocation);
 			kbUnitQuerySetMaximumDistance(baseQuery, baseDistance);
 
-			kbUnitQuerySetUnitType(baseQuery, cUnitTypeHasBountyValue);
+			if (crateFlagQuery >= 0)
+			{
+				kbUnitQuerySetUnitType(baseQuery, cUnitTypeAbstractResourceCrate);
+			}
+			else
+			{
+				kbUnitQuerySetUnitType(baseQuery, cUnitTypeHasBountyValue);
+			}
 			kbUnitQueryResetResults(baseQuery);
 			numberFound = kbUnitQueryExecute(baseQuery);
 
 			buildingPower = 0.0;
 			militaryPower = 0.0;
 			enemyMilitaryPower = 0.0;
-			// Gaia city states, prioritize them over everything.
-			baseAssets = cityStateQuery < 0 ? 0.0 : 99999.0;
+			if (cityStateQuery >= 0)
+			{
+				// Gaia city states are strategic pseudo-bases, so prioritize them over everything.
+				baseAssets = 99999.0;
+			}
+			else if (crateFlagQuery >= 0)
+			{
+				// Great Northern War objectives are worth 300 points per nearby resource crate.
+				baseAssets = numberFound * 300.0;
+				numberFound = 0; // Crates are already scored; do not run the normal bounty loop.
+			}
+			else
+			{
+				baseAssets = 0.0;
+			}
 			isKOTH = false;
 			isTradingPost = false;
 			shouldAttack = true;
@@ -993,15 +1811,15 @@ minInterval 15
 
 				for (i = 0; < numberEnemyFound)
 				{
-				unitID = kbUnitQueryGetResult(baseQuery, i);
-				puid = kbUnitGetProtoUnitID(unitID);
-				enemyMilitaryPower = enemyMilitaryPower + getMilitaryUnitStrength(puid);
+					unitID = kbUnitQueryGetResult(baseEnemyQuery, i);
+					puid = kbUnitGetProtoUnitID(unitID);
+					enemyMilitaryPower = enemyMilitaryPower + getMilitaryUnitStrength(puid);
 				}
 
 				if (enemyMilitaryPower == 0.0)
 				{
-				continue;
-			}
+					continue;
+				}
 			}
 
 			for (i = 0; < numberFound)
@@ -1123,6 +1941,9 @@ minInterval 15
 			}
 		}
 
+		// The next player always starts at its first base.
+		currentBaseIndex = 0;
+
 		// If we found a city state target, break now.
 		if (isItalianWars == true && cityStateQuery >= 0 && targetShouldAttack == true)
 		{
@@ -1130,53 +1951,90 @@ minInterval 15
 		}
 	}
 
-	// Update target player.
-	if (targetIsEnemy == true)
-	{
-		aiSetMostHatedPlayerID(targetPlayer);
-	}
+	// Snapshot the completed scan, then clear every static field before any abandonment or plan creation path.
+	int selectedBaseID = targetBaseID;
+	vector selectedBaseLocation = targetBaseLocation;
+	int selectedPlayer = targetPlayer;
+	bool selectedIsEnemy = targetIsEnemy;
+	bool selectedShouldAttack = targetShouldAttack;
 
-	if (targetBaseID < 0 || targetShouldAttack == false)
+	currentPlayer = -1;
+	currentBaseIndex = -1;
+	targetBaseID = -1;
+	targetBaseLocation = cInvalidVector;
+	targetPlayer = 2;
+	targetIsEnemy = true;
+	targetShouldAttack = false;
+	targetAffordable = 0.0;
+	targetBaseAssets = 0.0;
+	targetDistancePenalty = 0.0;
+	targetScore = 0.0;
+	maxBaseAssets = 100.0;
+	xsSetRuleMinIntervalSelf(15);
+	debugEvent("MIL-SCAN", "completed: target player " + selectedPlayer + ", base " + selectedBaseID);
+
+	if ((selectedShouldAttack == false) || (selectedBaseLocation == cInvalidVector))
 	{
 		// If we got nothing, and KOTH is active, grab the KOTH location.
 		if (defendingKOTH == true || attackingKOTH == true)
 		{
-			targetIsEnemy = attackingKOTH;
 			int kothID = getUnit(cUnitTypeypKingsHill, cPlayerRelationAny, cUnitStateAlive);
-			targetPlayer = kbUnitGetPlayerID(kothID);
-			targetBaseLocation = kbUnitGetPosition(kothID);
+			if (kothID < 0)
+			{
+				debugEvent("MIL-INVARIANT", "KOTH target requested but no King's Hill was found");
+				return;
+			}
+			selectedIsEnemy = attackingKOTH;
+			selectedPlayer = kbUnitGetPlayerID(kothID);
+			selectedBaseID = -1;
+			selectedBaseLocation = kbUnitGetPosition(kothID);
+			selectedShouldAttack = true;
 		}
-		// Exclude city state, which doesn't have a base ID.
-		else if (targetPlayer > 0)
+		else
 		{
 			return;
 		}
 	}
 
-	vector gatherPoint = kbBaseGetMilitaryGatherPoint(cMyID, mainBaseID);
-	if (targetIsEnemy == true)
+	// Update target player after KOTH fallback has had a chance to replace the scanned target.
+	if (selectedIsEnemy == true)
 	{
-		planID = aiPlanCreate("Attack Player " + targetPlayer + " Base " + targetBaseID, cPlanCombat);
+		aiSetMostHatedPlayerID(selectedPlayer);
+	}
+
+	vector gatherPoint = kbBaseGetMilitaryGatherPoint(cMyID, mainBaseID);
+	if (selectedIsEnemy == true)
+	{
+		planID = aiPlanCreate("Attack Player " + selectedPlayer + " Base " + selectedBaseID, cPlanCombat);
+		if (planID < 0)
+		{
+			debugEvent("MIL-INVARIANT", "failed to create land attack mission");
+			return;
+		}
 
 		aiPlanSetVariableInt(planID, cCombatPlanCombatType, 0, cCombatPlanCombatTypeAttack);
-		if (targetBaseID >= 0)
+		if (selectedBaseID >= 0)
 		{
 			aiPlanSetVariableInt(planID, cCombatPlanTargetMode, 0, cCombatPlanTargetModeBase);
-			aiPlanSetVariableInt(planID, cCombatPlanTargetBaseID, 0, targetBaseID);
+			aiPlanSetVariableInt(planID, cCombatPlanTargetBaseID, 0, selectedBaseID);
 		}
 		else
 		{
 			aiPlanSetVariableInt(planID, cCombatPlanTargetMode, 0, cCombatPlanTargetModePoint);
 		}
-		aiPlanSetVariableInt(planID, cCombatPlanTargetPlayerID, 0, targetPlayer);
-		aiPlanSetVariableVector(planID, cCombatPlanTargetPoint, 0, baseLocation);
+		aiPlanSetVariableInt(planID, cCombatPlanTargetPlayerID, 0, selectedPlayer);
+		aiPlanSetVariableVector(planID, cCombatPlanTargetPoint, 0, selectedBaseLocation);
 		aiPlanSetVariableVector(planID, cCombatPlanGatherPoint, 0, gatherPoint);
 		aiPlanSetVariableFloat(planID, cCombatPlanGatherDistance, 0, 40.0);
 
 		aiPlanSetVariableInt(planID, cCombatPlanAttackRoutePattern, 0, cCombatPlanAttackRoutePatternRandom);
 
-		// override the route when it is valid.
-		int routeID = cvCreateBaseAttackRoute(targetPlayer, targetBaseID);
+		// Point pseudo-targets (KOTH, city states, and crate objectives) have no base route.
+		int routeID = -1;
+		if (selectedBaseID >= 0)
+		{
+			routeID = cvCreateBaseAttackRoute(selectedPlayer, selectedBaseID);
+		}
 		if (routeID >= 0)
 		{
 			aiPlanSetVariableInt(planID, cCombatPlanAttackRouteID, 0, routeID);
@@ -1187,16 +2045,19 @@ minInterval 15
 		{
 			aiPlanSetVariableBool(planID, cCombatPlanAllowMoreUnitsDuringAttack, 0, true);
 			aiPlanSetVariableInt(planID, cCombatPlanRefreshFrequency, 0, 300);
-			aiPlanSetVariableInt(planID, cCombatPlanRetreatMode, 0, cCombatPlanRetreatModeNone);
+			aiPlanSetVariableInt(planID, cCombatPlanDoneMode, 0,
+				cCombatPlanDoneModeRetreat | cCombatPlanDoneModeBaseGone);
+			aiPlanSetVariableInt(planID, cCombatPlanRetreatMode, 0,
+				cCombatPlanRetreatModeOutnumbered);
 			// updateMilitaryTrainPlanBuildings(gForwardBaseID); TODO (James)
 		}
 		else
 		{
 			aiPlanSetVariableInt(planID, cCombatPlanRefreshFrequency, 0, 1000);
+			aiPlanSetVariableInt(planID, cCombatPlanDoneMode, 0, cCombatPlanDoneModeBaseGone);
 		}
-		aiPlanSetVariableInt(planID, cCombatPlanDoneMode, 0, cCombatPlanDoneModeBaseGone);
 		// If we do not have a base, destroy the plan when we have no targets.
-		if (targetBaseID < 0)
+		if (selectedBaseID < 0)
 		{
 			aiPlanSetVariableInt(planID, cCombatPlanDoneMode, 0, cCombatPlanDoneModeNoTarget | aiPlanGetVariableInt(planID, cCombatPlanDoneMode, 0));
 			aiPlanSetVariableInt(planID, cCombatPlanNoTargetTimeout, 0, 30000);
@@ -1206,39 +2067,48 @@ minInterval 15
 
 		addUnitsToMilitaryPlan(planID);
 
+		registerTransientLandCombatMission(planID, cLandMissionSourceAutoAttack);
 		aiPlanSetActive(planID);
 
 		gLastAttackMissionTime = xsGetTime();
-		debugMilitary("***** LAUNCHING ATTACK on player " + targetPlayer + " base " + targetBaseID);
+		debugMilitary("***** LAUNCHING ATTACK on player " + selectedPlayer + " base " + selectedBaseID);
+		debugEvent("MIL-MISSION", "created land attack plan " + planID + " for player " + selectedPlayer);
 	}
 	else
 	{
-		planID = aiPlanCreate("Defend Player " + targetPlayer + " Base " + targetBaseID, cPlanCombat);
+		planID = aiPlanCreate("Defend Player " + selectedPlayer + " Base " + selectedBaseID, cPlanCombat);
+		if (planID < 0)
+		{
+			debugEvent("MIL-INVARIANT", "failed to create ally-defense mission");
+			return;
+		}
 
 		aiPlanSetVariableInt(planID, cCombatPlanCombatType, 0, cCombatPlanCombatTypeDefend);
-		if (targetBaseID >= 0)
+		if (selectedBaseID >= 0)
 		{
 			aiPlanSetVariableInt(planID, cCombatPlanTargetMode, 0, cCombatPlanTargetModeBase);
-			aiPlanSetVariableInt(planID, cCombatPlanTargetBaseID, 0, targetBaseID);
+			aiPlanSetVariableInt(planID, cCombatPlanTargetBaseID, 0, selectedBaseID);
 		}
 		else
 		{
 			aiPlanSetVariableInt(planID, cCombatPlanTargetMode, 0, cCombatPlanTargetModePoint);
 		}
-		aiPlanSetVariableInt(planID, cCombatPlanTargetPlayerID, 0, targetPlayer);
-		aiPlanSetVariableVector(planID, cCombatPlanTargetPoint, 0, baseLocation);
+		aiPlanSetVariableInt(planID, cCombatPlanTargetPlayerID, 0, selectedPlayer);
+		aiPlanSetVariableVector(planID, cCombatPlanTargetPoint, 0, selectedBaseLocation);
 		aiPlanSetVariableInt(planID, cCombatPlanRefreshFrequency, 0, difficulty >= cDifficultyHard ? 300 : 1000);
-		aiPlanSetVariableInt(planID, cCombatPlanDoneMode, 0, cCombatPlanDoneModeNoTarget);
+		aiPlanSetVariableInt(planID, cCombatPlanDoneMode, 0, cCombatPlanDoneModeNoTarget | cCombatPlanDoneModeRetreat);
 		aiPlanSetVariableInt(planID, cCombatPlanNoTargetTimeout, 0, 30000);
-		aiPlanSetVariableInt(planID, cCombatPlanRetreatMode, 0, cCombatPlanRetreatModeNone);
+		aiPlanSetVariableInt(planID, cCombatPlanRetreatMode, 0, cCombatPlanRetreatModeOutnumbered);
 		aiPlanSetOrphan(planID, true);
 
 		addUnitsToMilitaryPlan(planID);
 
+		registerTransientLandCombatMission(planID, cLandMissionSourceAutoDefend);
 		aiPlanSetActive(planID);
 
 		gLastDefendMissionTime = xsGetTime();
-		debugMilitary("***** DEFENDING player " + targetPlayer + " base " + targetBaseID);
+		debugMilitary("***** DEFENDING player " + selectedPlayer + " base " + selectedBaseID);
+		debugEvent("MIL-MISSION", "created ally-defense plan " + planID + " for player " + selectedPlayer);
 	}
 }
 
@@ -2311,6 +3181,202 @@ minInterval 45
 
 
 //==============================================================================
+// defenseReflexPlansReady
+// The reflex rule owns two persistent combat plans. Never touch either plan or
+// leave the rule enabled unless both IDs still refer to live plans.
+//==============================================================================
+bool defenseReflexPlansReady(string caller = "defense reflex", bool reportFailure = true)
+{
+	bool defendPlanReady = true;
+	bool reservePlanReady = true;
+
+	if (gLandDefendPlan0 < 0)
+	{
+		defendPlanReady = false;
+	}
+	else if (aiPlanGetState(gLandDefendPlan0) < 0)
+	{
+		gLandDefendPlan0 = -1;
+		defendPlanReady = false;
+	}
+	else if (aiPlanGetType(gLandDefendPlan0) != cPlanCombat ||
+		aiPlanGetVariableInt(gLandDefendPlan0, cCombatPlanCombatType, 0) != cCombatPlanCombatTypeDefend)
+	{
+		gLandDefendPlan0 = -1;
+		defendPlanReady = false;
+	}
+	else if (aiPlanGetActive(gLandDefendPlan0) == false)
+	{
+		if (aiPlanSetActive(gLandDefendPlan0) == true)
+		{
+			debugEvent("MIL-REFLEX", caller + ": reactivated persistent land defend plan " +
+				gLandDefendPlan0);
+		}
+		else
+		{
+			debugEvent("MIL-INVARIANT", caller + ": could not reactivate persistent land defend plan " +
+				gLandDefendPlan0 + "; replacing it");
+			aiPlanDestroy(gLandDefendPlan0);
+			gLandDefendPlan0 = -1;
+			defendPlanReady = false;
+		}
+	}
+
+	if (gLandReservePlan < 0)
+	{
+		reservePlanReady = false;
+	}
+	else if (aiPlanGetState(gLandReservePlan) < 0)
+	{
+		gLandReservePlan = -1;
+		reservePlanReady = false;
+	}
+	else if (aiPlanGetType(gLandReservePlan) != cPlanCombat ||
+		aiPlanGetVariableInt(gLandReservePlan, cCombatPlanCombatType, 0) != cCombatPlanCombatTypeDefend)
+	{
+		gLandReservePlan = -1;
+		reservePlanReady = false;
+	}
+	else if (aiPlanGetActive(gLandReservePlan) == false)
+	{
+		if (aiPlanSetActive(gLandReservePlan) == true)
+		{
+			debugEvent("MIL-REFLEX", caller + ": reactivated persistent land reserve plan " +
+				gLandReservePlan);
+		}
+		else
+		{
+			debugEvent("MIL-INVARIANT", caller + ": could not reactivate persistent land reserve plan " +
+				gLandReservePlan + "; replacing it");
+			aiPlanDestroy(gLandReservePlan);
+			gLandReservePlan = -1;
+			reservePlanReady = false;
+		}
+	}
+
+	if (defendPlanReady == true && reservePlanReady == true)
+	{
+		return (true);
+	}
+
+	xsDisableRule("defenseReflex");
+	gDefenseReflex = false;
+	gDefenseReflexPaused = false;
+	gDefenseReflexBaseID = -1;
+	gDefenseReflexLocation = cInvalidVector;
+	gDefenseReflexTimeout = 0;
+	if (reportFailure == true)
+	{
+		debugEvent("MIL-INVARIANT", caller + ": persistent defense plan missing; reflex disabled");
+	}
+	return (false);
+}
+
+
+//==============================================================================
+// cancelNonPersistentLandCombatMissions
+// A main-base reflex must reclaim land combat units from real attack and
+// ally-defense missions. Persistent, specialist, and water plans are preserved.
+//==============================================================================
+bool isProtectedLandCombatPlan(int planID = -1)
+{
+	return(
+		(planID == gLandDefendPlan0) ||
+		(planID == gLandReservePlan) ||
+		(planID == gBaseDefendPlan) ||
+		(planID == gExplorerControlPlan) ||
+		(planID == gHealerPlan) ||
+		(planID == gNavyAttackPlan) ||
+		(planID == gNavyDefendPlan) ||
+		(planID == gNavyRepairPlan));
+}
+
+
+bool isCancelableTopLevelLandCombatPlan(int planID = -1, bool includeAllyDefense = true)
+{
+	if ((planID < 0) || (aiPlanGetType(planID) != cPlanCombat))
+	{
+		return(false);
+	}
+	if (aiPlanGetParentID(planID) >= 0)
+	{
+		return(false);
+	}
+	if (isProtectedLandCombatPlan(planID) == true)
+	{
+		return(false);
+	}
+
+	int combatType = aiPlanGetVariableInt(planID, cCombatPlanCombatType, 0);
+	if (combatType == cCombatPlanCombatTypeAttack)
+	{
+		return(true);
+	}
+	if ((includeAllyDefense == true) && (combatType == cCombatPlanCombatTypeDefend))
+	{
+		int targetPlayerID = aiPlanGetVariableInt(planID, cCombatPlanTargetPlayerID, 0);
+		if ((targetPlayerID > 0) && (targetPlayerID != cMyID) && kbIsPlayerAlly(targetPlayerID))
+		{
+			return(true);
+		}
+	}
+	return(false);
+}
+
+
+bool cancelTopLevelLandCombatPlan(int planID = -1, string reason = "script",
+	bool includeAllyDefense = true)
+{
+	if ((planID < 0) || (aiPlanGetType(planID) != cPlanCombat))
+	{
+		return(false);
+	}
+
+	int parentPlanID = aiPlanGetParentID(planID);
+	if (parentPlanID >= 0)
+	{
+		debugEvent("MIL-INVARIANT", "refused child combat cancellation id=" + planID +
+			" parent=" + parentPlanID + " reason=" + reason);
+		return(false);
+	}
+	if (isCancelableTopLevelLandCombatPlan(planID, includeAllyDefense) == false)
+	{
+		return(false);
+	}
+
+	int combatType = aiPlanGetVariableInt(planID, cCombatPlanCombatType, 0);
+	int targetPlayerID = aiPlanGetVariableInt(planID, cCombatPlanTargetPlayerID, 0);
+	if ((combatType == cCombatPlanCombatTypeDefend) && (targetPlayerID > 0) &&
+		(targetPlayerID != cMyID) && kbIsPlayerAlly(targetPlayerID))
+	{
+		debugEvent("MIL-HELP", "cancel ally-defense parent=" + planID + " player=" +
+			targetPlayerID + " reason=" + reason);
+	}
+	debugEvent("MIL-MISSION", "cancel parent=" + planID + " combat=" + combatType +
+		" reason=" + reason);
+	traceTransientLandMissionCancellation(planID, reason);
+	aiPlanDestroy(planID);
+	return(true);
+}
+
+
+void cancelNonPersistentLandCombatMissions(string reason = "main-base defense reflex",
+	bool includeAllyDefense = true)
+{
+	int planIndex = aiPlanGetActiveCount() - 1;
+	int planID = -1;
+
+	// Walk backward so destroying a plan cannot shift an unvisited active-plan index.
+	while (planIndex >= 0)
+	{
+		planID = aiPlanGetIDByActiveIndex(planIndex);
+		cancelTopLevelLandCombatPlan(planID, reason, includeAllyDefense);
+		planIndex--;
+	}
+}
+
+
+//==============================================================================
 /*
 	moveDefenseReflex(vector, radius, baseID)
 
@@ -2321,6 +3387,15 @@ minInterval 45
 //==============================================================================
 void moveDefenseReflex(vector location = cInvalidVector, float radius = -1.0, int baseID = -1)
 {
+	if (defenseReflexPlansReady("moveDefenseReflex") == false)
+	{
+		return;
+	}
+
+	bool wasActive = gDefenseReflex;
+	bool wasPaused = gDefenseReflexPaused;
+	int previousBaseID = gDefenseReflexBaseID;
+
 	if (radius < 0.0)
 		radius = cvDefenseReflexRadiusActive;
 	if (location != cInvalidVector)
@@ -2370,6 +3445,18 @@ void moveDefenseReflex(vector location = cInvalidVector, float radius = -1.0, in
 		gDefenseReflexPaused = false;
 	}
 	debugMilitary("******** Defense reflex moved to base " + baseID + " with radius " + radius + " and location " + location);
+	if (wasActive == false && gDefenseReflex == true)
+	{
+		debugEvent("MIL-REFLEX", "entered at base " + baseID);
+	}
+	else if (previousBaseID != baseID)
+	{
+		debugEvent("MIL-REFLEX", "moved from base " + previousBaseID + " to base " + baseID);
+	}
+	else if (wasPaused == true && gDefenseReflexPaused == false)
+	{
+		debugEvent("MIL-REFLEX", "resumed at base " + baseID);
+	}
 }
 
 
@@ -2386,6 +3473,11 @@ void moveDefenseReflex(vector location = cInvalidVector, float radius = -1.0, in
 //==============================================================================
 void pauseDefenseReflex(void)
 {
+	if (defenseReflexPlansReady("pauseDefenseReflex") == false)
+	{
+		return;
+	}
+
 	// vector loc = kbBaseGetMilitaryGatherPoint(cMyID, kbBaseGetMainID(cMyID));
 	vector loc = (gHomeBase + gDirection_UP * 30.0);
 	if (gForwardBaseState != cForwardBaseStateNone)
@@ -2409,6 +3501,7 @@ void pauseDefenseReflex(void)
 	gDefenseReflexPaused = true;
 
 	debugMilitary("******** Defense reflex paused.");
+	debugEvent("MIL-REFLEX", "paused at base " + gDefenseReflexBaseID);
 }
 
 
@@ -2421,6 +3514,13 @@ void pauseDefenseReflex(void)
 //==============================================================================
 void endDefenseReflex(void)
 {
+	if (defenseReflexPlansReady("endDefenseReflex") == false)
+	{
+		return;
+	}
+
+	int endedBaseID = gDefenseReflexBaseID;
+	bool wasActive = gDefenseReflex;
 	vector resLoc = kbBaseGetMilitaryGatherPoint(cMyID, kbBaseGetMainID(cMyID));
 	int defBaseID = kbBaseGetMainID(cMyID);
 	vector defLoc = kbBaseGetLocation(cMyID, defBaseID);
@@ -2473,6 +3573,10 @@ void endDefenseReflex(void)
 	gDefenseReflexBaseID = -1;
 	gDefenseReflexLocation = cInvalidVector;
 	gDefenseReflexTimeout = 0;
+	if (wasActive == true)
+	{
+		debugEvent("MIL-REFLEX", "ended at base " + endedBaseID);
+	}
 }
 
 
@@ -2483,6 +3587,10 @@ inactive
 minInterval 1
 {
 	xsDisableSelf();
+	if (defenseReflexPlansReady("endDefenseReflexDelay") == false)
+	{
+		return;
+	}
 	endDefenseReflex();
 }
 
@@ -2498,82 +3606,161 @@ inactive
 group postStartup
 minInterval 13
 {
+	int mainBaseID = kbBaseGetMainID(cMyID);
+	if (mainBaseID < 0)
+	{
+		xsDisableRule("defenseReflex");
+		gDefenseReflex = false;
+		gDefenseReflexPaused = false;
+		gDefenseReflexBaseID = -1;
+		gDefenseReflexLocation = cInvalidVector;
+		gDefenseReflexTimeout = 0;
+		debugEvent("MIL-INVARIANT", "defend0: main base is missing; reflex disabled");
+		return;
+	}
+
+	// Normalize stale plan IDs and disable the consumer while either plan is absent.
+	bool reportMissingPlans = xsIsRuleEnabled("defenseReflex") || gDefenseReflex;
+	bool plansWereReady = defenseReflexPlansReady("defend0 health check", reportMissingPlans);
+	bool repairedPlan = false;
+	vector mainBaseLocation = kbBaseGetLocation(cMyID, mainBaseID);
+	vector targetPoint = kbBaseGetMilitaryGatherPoint(cMyID, mainBaseID);
+	if (mainBaseLocation == cInvalidVector)
+	{
+		xsDisableRule("defenseReflex");
+		gDefenseReflex = false;
+		gDefenseReflexPaused = false;
+		gDefenseReflexBaseID = -1;
+		gDefenseReflexLocation = cInvalidVector;
+		gDefenseReflexTimeout = 0;
+		debugEvent("MIL-INVARIANT", "defend0: main-base location is invalid; reflex disabled");
+		return;
+	}
+	if (targetPoint == cInvalidVector)
+		targetPoint = mainBaseLocation;
+	int difficulty = cDifficultyCurrent;
+
 	if (gLandDefendPlan0 < 0)
 	{
-		int mainBaseID = kbBaseGetMainID(cMyID);
-		vector mainBaseLocation = kbBaseGetLocation(cMyID, mainBaseID);
-		vector targetPoint = kbBaseGetMilitaryGatherPoint(cMyID, mainBaseID);
-		int targetMode = cCombatPlanTargetModeBase;
-		int difficulty = cDifficultyCurrent;
-
 		gLandDefendPlan0 = aiPlanCreate("Primary Land Defend", cPlanCombat);
-		aiPlanAddUnitType(gLandDefendPlan0, cUnitTypeLogicalTypeLandMilitary, 0, 0, 1); // Small, until defense reflex
-		aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanCombatType, 0, cCombatPlanCombatTypeDefend);
-		aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanTargetMode, 0, targetMode);
-		aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanTargetPlayerID, 0, cMyID);
-		aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanTargetBaseID, 0, mainBaseID);
-		aiPlanSetVariableVector(gLandDefendPlan0, cCombatPlanTargetPoint, 0, targetPoint);
-		aiPlanSetVariableFloat(gLandDefendPlan0, cCombatPlanGatherDistance, 0, 20.0);
-		aiPlanSetInitialPosition(gLandDefendPlan0, mainBaseLocation);
-		if (difficulty >= cDifficultyHard)
+		if (gLandDefendPlan0 >= 0)
 		{
-			aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanRefreshFrequency, 0, 300);
-			aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanRetreatMode, 0, cCombatPlanRetreatModeNone);
-		}
-		else
-		{
-			aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanRefreshFrequency, 0, 1000);
-		}
-		aiPlanSetDesiredPriority(gLandDefendPlan0, 10); // Very low priority, don't steal from attack plans
-		aiPlanSetActive(gLandDefendPlan0);
-		debugMilitary("Creating primary land defend plan");
-
-		gLandReservePlan = aiPlanCreate("Land Reserve Units", cPlanCombat);
-		aiPlanAddUnitType(
-			gLandReservePlan,
-			cUnitTypeLogicalTypeLandMilitary,
-			0,
-			5,
-			200); // All mil units, high MAX value to suck up all excess
-		aiPlanSetVariableInt(gLandReservePlan, cCombatPlanCombatType, 0, cCombatPlanCombatTypeDefend);
-		if (targetPoint == cInvalidVector)
-		{
-			int aiStartID = getUnit(cUnitTypeAIStart, cMyID);
-			if (aiStartID >= 0)
+			aiPlanAddUnitType(gLandDefendPlan0, cUnitTypeLogicalTypeLandMilitary, 0, 0, 1); // Small, until defense reflex.
+			aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanCombatType, 0, cCombatPlanCombatTypeDefend);
+			aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanTargetMode, 0, cCombatPlanTargetModeBase);
+			aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanTargetPlayerID, 0, cMyID);
+			aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanTargetBaseID, 0, mainBaseID);
+			aiPlanSetVariableVector(gLandDefendPlan0, cCombatPlanTargetPoint, 0, targetPoint);
+			aiPlanSetVariableFloat(gLandDefendPlan0, cCombatPlanGatherDistance, 0, 20.0);
+			aiPlanSetInitialPosition(gLandDefendPlan0, mainBaseLocation);
+			if (difficulty >= cDifficultyHard)
 			{
-				targetPoint = kbUnitGetPosition(aiStartID);
-				targetMode = cCombatPlanTargetModePoint;
+				aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanRefreshFrequency, 0, 300);
+				aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanRetreatMode, 0,
+					cCombatPlanRetreatModeOutnumbered);
 			}
-		}
-		if (targetPoint == cInvalidVector)
-			targetPoint = mainBaseLocation;
-		aiPlanSetVariableInt(gLandReservePlan, cCombatPlanTargetMode, 0, targetMode);
-		if (targetMode == cCombatPlanTargetModeBase)
-		{
-			aiPlanSetVariableInt(gLandReservePlan, cCombatPlanTargetPlayerID, 0, cMyID);
-			aiPlanSetVariableInt(gLandReservePlan, cCombatPlanTargetBaseID, 0, mainBaseID);
-		}
-		else
-		{
-			aiPlanSetVariableFloat(gLandReservePlan, cCombatPlanTargetEngageRange, 0, 60.0);
-		}
-		aiPlanSetVariableVector(gLandReservePlan, cCombatPlanTargetPoint, 0, targetPoint);
-		aiPlanSetVariableFloat(gLandReservePlan, cCombatPlanGatherDistance, 0, 20.0);
-		aiPlanSetInitialPosition(gLandReservePlan, mainBaseLocation);
-		if (difficulty >= cDifficultyHard)
-		{
-			aiPlanSetVariableInt(gLandReservePlan, cCombatPlanRefreshFrequency, 0, 300);
-			aiPlanSetVariableInt(gLandReservePlan, cCombatPlanRetreatMode, 0, cCombatPlanRetreatModeNone);
+			else
+			{
+				aiPlanSetVariableInt(gLandDefendPlan0, cCombatPlanRefreshFrequency, 0, 1000);
+			}
+			aiPlanSetDesiredPriority(gLandDefendPlan0, 10); // Very low priority, don't steal from attack plans.
+			aiPlanSetActive(gLandDefendPlan0);
+			repairedPlan = true;
+			debugMilitary("Creating primary land defend plan");
+			debugEvent("MIL-MISSION", "created persistent land defend plan " + gLandDefendPlan0);
 		}
 		else
 		{
-			aiPlanSetVariableInt(gLandReservePlan, cCombatPlanRefreshFrequency, 0, 1000);
+			debugEvent("MIL-INVARIANT", "defend0: failed to create persistent land defend plan");
 		}
-		aiPlanSetDesiredPriority(gLandReservePlan, 5); // Very very low priority, gather unused units.
+	}
+
+	if (gLandReservePlan < 0)
+	{
+		gLandReservePlan = aiPlanCreate("Land Reserve Units", cPlanCombat);
+		if (gLandReservePlan >= 0)
+		{
+			int reserveTargetMode = cCombatPlanTargetModeBase;
+			vector reserveTargetPoint = targetPoint;
+			if (reserveTargetPoint == cInvalidVector)
+			{
+				int aiStartID = getUnit(cUnitTypeAIStart, cMyID);
+				if (aiStartID >= 0)
+				{
+					reserveTargetPoint = kbUnitGetPosition(aiStartID);
+					reserveTargetMode = cCombatPlanTargetModePoint;
+				}
+			}
+			if (reserveTargetPoint == cInvalidVector)
+			{
+				reserveTargetPoint = mainBaseLocation;
+			}
+
+			aiPlanAddUnitType(
+				gLandReservePlan,
+				cUnitTypeLogicalTypeLandMilitary,
+				0,
+				5,
+				200); // All military units, high MAX value to gather unused forces.
+			aiPlanSetVariableInt(gLandReservePlan, cCombatPlanCombatType, 0, cCombatPlanCombatTypeDefend);
+			aiPlanSetVariableInt(gLandReservePlan, cCombatPlanTargetMode, 0, reserveTargetMode);
+			if (reserveTargetMode == cCombatPlanTargetModeBase)
+			{
+				aiPlanSetVariableInt(gLandReservePlan, cCombatPlanTargetPlayerID, 0, cMyID);
+				aiPlanSetVariableInt(gLandReservePlan, cCombatPlanTargetBaseID, 0, mainBaseID);
+			}
+			else
+			{
+				aiPlanSetVariableFloat(gLandReservePlan, cCombatPlanTargetEngageRange, 0, 60.0);
+			}
+			aiPlanSetVariableVector(gLandReservePlan, cCombatPlanTargetPoint, 0, reserveTargetPoint);
+			aiPlanSetVariableFloat(gLandReservePlan, cCombatPlanGatherDistance, 0, 20.0);
+			aiPlanSetInitialPosition(gLandReservePlan, mainBaseLocation);
+			if (difficulty >= cDifficultyHard)
+			{
+				aiPlanSetVariableInt(gLandReservePlan, cCombatPlanRefreshFrequency, 0, 300);
+				aiPlanSetVariableInt(gLandReservePlan, cCombatPlanRetreatMode, 0,
+					cCombatPlanRetreatModeOutnumbered);
+			}
+			else
+			{
+				aiPlanSetVariableInt(gLandReservePlan, cCombatPlanRefreshFrequency, 0, 1000);
+			}
+			aiPlanSetDesiredPriority(gLandReservePlan, 5); // Very low priority, gather unused units.
+			aiPlanSetActive(gLandReservePlan);
+			repairedPlan = true;
+			debugMilitary("Creating reserve plan");
+			debugEvent("MIL-MISSION", "created persistent land reserve plan " + gLandReservePlan);
+		}
+		else
+		{
+			debugEvent("MIL-INVARIANT", "defend0: failed to create persistent land reserve plan");
+		}
+	}
+
+	if (defenseReflexPlansReady("defend0 post-repair") == true)
+	{
+		// Repair a valid but inactive persistent plan before the reflex rule can consume it.
+		aiPlanSetActive(gLandDefendPlan0);
 		aiPlanSetActive(gLandReservePlan);
-		debugMilitary("Creating reserve plan");
-		xsEnableRule("endDefenseReflexDelay"); // Reset to relaxed stances after plans have a second to be created.
-		xsDisableSelf();
+		if (repairedPlan == true)
+		{
+			// Restore passive targets after both replacement plans have been created.
+			xsEnableRule("endDefenseReflexDelay");
+		}
+		if (xsIsRuleEnabled("defenseReflex") == false)
+		{
+			debugEvent("MIL-REFLEX", "enabled with defend/reserve plans ready");
+		}
+		xsEnableRule("defenseReflex");
+	}
+	else
+	{
+		xsDisableRule("defenseReflex");
+		if (plansWereReady == true)
+		{
+			debugEvent("MIL-INVARIANT", "defend0: defense plans became unavailable");
+		}
 	}
 }
 
@@ -2676,15 +3863,22 @@ rule defenseReflex
 inactive
 minInterval 10
 {
+	if (defenseReflexPlansReady("defenseReflex rule") == false)
+	{
+		return;
+	}
+
 	int armySize = aiPlanGetNumberUnits(gLandDefendPlan0, cUnitTypeLogicalTypeLandMilitary) +
 					aiPlanGetNumberUnits(gLandReservePlan, cUnitTypeLogicalTypeLandMilitary);
 	int enemyArmySize = -1;
 	static int lastHelpTime = -60000;
 	static int lastHelpBaseID = -1;
+	static int lastHelpSuppressedLogTime = -60000;
 	int i = 0;
 	int unitID = -1;
 	int protoUnitID = -1;
 	bool panic = false; // Indicates need for call for help.
+	string helpSuppressionReason = "";
 	int planID = -1;
 	int mainBaseID = kbBaseGetMainID(cMyID);
 	int time = xsGetTime();
@@ -2730,27 +3924,34 @@ minInterval 10
 					(lastHelpBaseID == gDefenseReflexBaseID)) // We called for help in the last five minutes, and it was this base.
 				{
 					panic = false;
+					helpSuppressionReason = "same-base five-minute cooldown";
 				}
 				if (((time - lastHelpTime) < 60000) &&
 					(lastHelpBaseID != gDefenseReflexBaseID)) // We called for help anywhere in the last minute.
 				{
 					panic = false;
+					helpSuppressionReason = "global one-minute cooldown";
 				}
 
 				if (panic == true)
 				{
+					debugEvent("MIL-HELP", "send request base=" + gDefenseReflexBaseID +
+						", army=" + armySize + ", enemy=" + enemyArmySize + ", location=" +
+						kbBaseGetLocation(cMyID, gDefenseReflexBaseID));
 					sendStatement(cPlayerRelationAllyExcludingSelf, cAICommPromptToAllyINeedHelpMyBase,
 						kbBaseGetLocation(cMyID, gDefenseReflexBaseID));
 					debugMilitary("I'm calling for help");
 					lastHelpTime = time;
+					lastHelpBaseID = gDefenseReflexBaseID;
+				}
+				else if ((time - lastHelpSuppressedLogTime) >= 60000)
+				{
+					debugEvent("MIL-HELP", "suppress request base=" + gDefenseReflexBaseID +
+						": " + helpSuppressionReason + ", elapsedSinceLast=" + (time - lastHelpTime));
+					lastHelpSuppressedLogTime = time;
 				}
 
-				// Call back our attack if any.
-				planID = aiPlanGetIDByTypeAndVariableType(cPlanCombat, cCombatPlanCombatType, cCombatPlanCombatTypeAttack);
-				if (planID >= 0)
-				{
-					aiPlanDestroy(planID);
-				}
+				cancelNonPersistentLandCombatMissions("main-base defense reflex remains outnumbered");
 			}
 			else
 			{	// Size is OK to handle, shouldn't be in paused mode.
@@ -2763,6 +3964,8 @@ minInterval 10
 		else // Defense reflex wasn't set to main base.
 		{	// Need to set the defense reflex to home base...doesn't matter if it was inactive or guarding another base,
 			// home base trumps all.
+			// Cancel real land missions before the persistent plans reclaim their units.
+			cancelNonPersistentLandCombatMissions("main-base raid");
 			moveDefenseReflex(kbBaseGetLocation(cMyID, mainBaseID), cvDefenseReflexRadiusActive, mainBaseID);
 			// This is a new defense reflex in the main base.  Consider making a chat about it.
 			int enemyPlayerID = kbUnitGetPlayerID(kbUnitQueryGetResult(enemyArmyQuery, 0));
@@ -2891,27 +4094,35 @@ minInterval 10
 				(lastHelpBaseID == gDefenseReflexBaseID)) // We called for help in the last five minutes, and it was this base.
 			{
 				panic = false;
+				helpSuppressionReason = "same-base five-minute cooldown";
 			}
 			if (((time - lastHelpTime) < 60000) &&
 				(lastHelpBaseID != gDefenseReflexBaseID)) // We called for help anywhere in the last minute.
 			{
 				panic = false;
+				helpSuppressionReason = "global one-minute cooldown";
 			}
 
 			if (panic == true)
 			{
+				debugEvent("MIL-HELP", "send request base=" + gDefenseReflexBaseID +
+					", army=" + armySize + ", enemy=" + enemyArmySize + ", location=" +
+					kbBaseGetLocation(cMyID, gDefenseReflexBaseID));
 				sendStatement(cPlayerRelationAlly, cAICommPromptToAllyINeedHelpMyBase, kbBaseGetLocation(cMyID, gDefenseReflexBaseID));
 				debugMilitary("     I'm calling for help.");
-				lastHelpTime = xsGetTime();
+				lastHelpTime = time;
+				lastHelpBaseID = gDefenseReflexBaseID;
+			}
+			else if ((time - lastHelpSuppressedLogTime) >= 60000)
+			{
+				debugEvent("MIL-HELP", "suppress request base=" + gDefenseReflexBaseID +
+					": " + helpSuppressionReason + ", elapsedSinceLast=" + (time - lastHelpTime));
+				lastHelpSuppressedLogTime = time;
 			}
 
 			// Call back our attack if any.
 			// TODO: Not main base, maybe not always worth defending?
-			planID = aiPlanGetIDByTypeAndVariableType(cPlanCombat, cCombatPlanCombatType, cCombatPlanCombatTypeAttack);
-			if (planID >= 0)
-			{
-				aiPlanDestroy(planID);
-			}
+			cancelNonPersistentLandCombatMissions("outnumbered defense reflex", false);
 		}
 		return; // Done...we're staying in defense mode for this base, and have paused or gone active as needed.
 	}
@@ -2960,25 +4171,37 @@ minInterval 10
 
 				if ((enemyArmySize > (armySize * 2.0)) && (enemyArmySize > 6)) // Double my size, get help...
 				{
-				panic = true;
-				if (((time - lastHelpTime) < 300000) &&
-					(lastHelpBaseID == baseID)) // We called for help in the last five minutes, and it was this base.
-				{
-					panic = false;
-				}
-				if (((time - lastHelpTime) < 60000) &&
-					(lastHelpBaseID != baseID)) // We called for help anywhere in the last minute.
-				{
-					panic = false;
-				}
+					panic = true;
+					if (((time - lastHelpTime) < 300000) &&
+						(lastHelpBaseID == baseID)) // We called for help in the last five minutes, and it was this base.
+					{
+						panic = false;
+						helpSuppressionReason = "same-base five-minute cooldown";
+					}
+					if (((time - lastHelpTime) < 60000) &&
+						(lastHelpBaseID != baseID)) // We called for help anywhere in the last minute.
+					{
+						panic = false;
+						helpSuppressionReason = "global one-minute cooldown";
+					}
 
-				if (panic == true)
-				{
-					// Don't kill other missions, this isn't the main base. Just call for help.
-					sendStatement(cPlayerRelationAllyExcludingSelf, cAICommPromptToAllyINeedHelpMyBase, kbBaseGetLocation(cMyID, baseID));
-					debugMilitary("I'm calling for help.");
-					lastHelpTime = time;
-				}
+					if (panic == true)
+					{
+						// Don't kill other missions, this isn't the main base. Just call for help.
+						debugEvent("MIL-HELP", "send request base=" + baseID + ", army=" + armySize +
+							", enemy=" + enemyArmySize + ", location=" + kbBaseGetLocation(cMyID, baseID));
+						sendStatement(cPlayerRelationAllyExcludingSelf, cAICommPromptToAllyINeedHelpMyBase,
+							kbBaseGetLocation(cMyID, baseID));
+						debugMilitary("I'm calling for help.");
+						lastHelpTime = time;
+						lastHelpBaseID = baseID;
+					}
+					else if ((time - lastHelpSuppressedLogTime) >= 60000)
+					{
+						debugEvent("MIL-HELP", "suppress request base=" + baseID + ": " +
+							helpSuppressionReason + ", elapsedSinceLast=" + (time - lastHelpTime));
+						lastHelpSuppressedLogTime = time;
+					}
 				}
 				else
 				{
