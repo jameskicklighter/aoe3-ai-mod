@@ -61,6 +61,7 @@ void initMapData(void)
 	gDirection_RIGHT = xsVectorSet(xsVectorGetZ(gDirection_UP), 0.0, xsVectorGetX(gDirection_UP) * -1.0);
 	gDirection_LEFT = gDirection_RIGHT * -1.0;
 
+	gMapNames = xsArrayCreateString(242, "", "Map names");
 	xsArraySetString(gMapNames, 0, "afatlas");
 	xsArraySetString(gMapNames, 1, "afatlaslarge");
 	xsArraySetString(gMapNames, 2, "afdarfur");
@@ -295,7 +296,15 @@ void initMapData(void)
 	xsArraySetString(gMapNames, 231, "euvistulabasinlarge");
 	xsArraySetString(gMapNames, 232, "euwallachia");
 	xsArraySetString(gMapNames, 233, "euwallachialarge");
-	// List above is up to date for the Italy/Malta release.
+	xsArraySetString(gMapNames, 234, "eumediterranean");
+	xsArraySetString(gMapNames, 235, "eumediterraneanlarge");
+	xsArraySetString(gMapNames, 236, "eubaltic");
+	xsArraySetString(gMapNames, 237, "eubalticlarge");
+	xsArraySetString(gMapNames, 238, "euwales");
+	xsArraySetString(gMapNames, 239, "euwaleslarge");
+	xsArraySetString(gMapNames, 240, "eumuscovy");
+	xsArraySetString(gMapNames, 241, "eumuscovylarge");
+	// 242 stable map-name entries, through Mediterranean, Baltic, Wales, and Muscovy.
 
 	debugSetup("         Analyzing Map");
 	debugSetup("Map name is: " + cRandomMapName);
@@ -481,6 +490,8 @@ void initMapData(void)
 	{
 		debugSetup("We found no Trading Routes on this map");
 	}
+	debugEvent("MAP", "initialized name=" + cRandomMapName + ", allies=" + numAllies +
+		", enemies=" + numEnemies + ", routes=" + gNumberTradeRoutes + ", navy=" + gNavyMap);
 }
 
 
@@ -732,6 +743,7 @@ void initCiv(void) {
 			arrayPushInt(gAgeUpList, cTechPoliticianBishopFortress);
 			arrayPushInt(gAgeUpList, cTechDEPoliticianPope);
 			arrayPushInt(gAgeUpList, cTechPoliticianPresidente);
+			break;
 		}
 		case cCivDEMaltese: {
 			gEconUnit = cUnitTypeSettler;
@@ -755,6 +767,7 @@ void initCiv(void) {
 			arrayPushInt(gAgeUpList, cTechPoliticianBishopFortress);
 			arrayPushInt(gAgeUpList, cTechDEPoliticianPope);
 			arrayPushInt(gAgeUpList, cTechPoliticianPresidente);
+			break;
 		}
 		case cCivDEAmericans: {
 			gEconUnit = cUnitTypeSettler;
@@ -1228,6 +1241,15 @@ void initHandlers(void) {
 void initArrays(void)
 {
 
+	gTracedLandMissionUnitIDs = xsArrayCreateInt(cLandMissionUnitSampleCapacity, -1,
+		"Traced land mission unit IDs");
+	gTracedLandMissionUnitOriginPlanIDs = xsArrayCreateInt(cLandMissionUnitSampleCapacity, -1,
+		"Traced land mission origin plan IDs");
+	gPostLandMissionUnitIDs = xsArrayCreateInt(cLandMissionUnitSampleCapacity, -1,
+		"Post land mission unit IDs");
+	gPostLandMissionUnitOriginPlanIDs = xsArrayCreateInt(cLandMissionUnitSampleCapacity, -1,
+		"Post land mission origin plan IDs");
+
 	gArrayEnemyPlayerIDs = xsArrayCreateInt(cNumberPlayers - 2, -1, "Enemy Player IDs");
 	gStartingPosDistances = xsArrayCreateFloat(cNumberPlayers, 0.0, "Player Starting Position Distances");
 	vector startLoc = kbGetPlayerStartingPosition(cMyID);
@@ -1426,8 +1448,6 @@ void initArrays(void)
 			// Hacienda.
 			arrayPushInt(gMillTechs, cTechSeedDrill);
 			arrayPushInt(gMillTechsAgeReq, cAge2);
-			arrayPushInt(gMillTechs, cTechSelectiveBreeding);
-			arrayPushInt(gMillTechsAgeReq, cAge3);
 			arrayPushInt(gMillTechs, cTechArtificialFertilizer);
 			arrayPushInt(gMillTechsAgeReq, cAge3);
 			arrayPushInt(gMillTechs, cTechBookkeeping);
@@ -1483,6 +1503,12 @@ void initArrays(void)
 		if (cMyCiv != cCivXPIroquois && cMyCiv != cCivXPSioux)
 		{
 			arrayPushInt(gMarketTechs, cTechPlacerMines);
+			arrayPushInt(gMarketTechsAgeReq, cAge2);
+			arrayPushInt(gMarketTechsPrio, -1);
+		}
+		else
+		{
+			arrayPushInt(gMarketTechs, cTechDEFurDressing);
 			arrayPushInt(gMarketTechsAgeReq, cAge2);
 			arrayPushInt(gMarketTechsPrio, -1);
 		}
@@ -1612,9 +1638,6 @@ void initArrays(void)
 	else
 	{
 		// Livestock Market.
-		arrayPushInt(gMarketTechs, cTechSelectiveBreeding);
-		arrayPushInt(gMarketTechsAgeReq, cAge3); // We don't want to research until Age 3.
-		arrayPushInt(gMarketTechsPrio, -1);
 		arrayPushInt(gMarketTechs, cTechDEAfricanVillagerWoodcutting1);
 		arrayPushInt(gMarketTechsAgeReq, cAge2);
 		arrayPushInt(gMarketTechsPrio, -1);
@@ -1758,7 +1781,7 @@ void initArrays(void)
 			arrayPushInt(gAllegianceTechs, cTechDENatGhorfas);
 			arrayPushInt(gAllegianceTechsAgeReq, cAge3);
 			arrayPushInt(gAllegianceTechsPrio, 40);
-			arrayPushInt(gAllegianceTechs, cTechYPNatJesuitSmokelessPowder);
+			arrayPushInt(gAllegianceTechs, cTechDENatBerberDesertKings);
 			arrayPushInt(gAllegianceTechsAgeReq, cAge4);
 			arrayPushInt(gAllegianceTechsPrio, 40);
 
@@ -2176,6 +2199,10 @@ minInterval 2
 	// Town center found, start building the other buildings
 	xsDisableSelf();
 	xsEnableRuleGroup("tcComplete");
+	gLastClaimTradeMissionTime = xsGetTime() - gClaimTradeMissionInterval;
+	gLastClaimNativeMissionTime = xsGetTime();
+	xsEnableRule("tradingPostMonitor");
+	debugEvent("TP", "post-TC monitor enabled");
 
 	if (cMyCiv != cCivOttomans)
 	{
@@ -2205,9 +2232,6 @@ minInterval 2
 	if (flagUnit >= 0)
 		gNavyVec = kbUnitGetPosition(flagUnit);
 
-	gLastClaimTradeMissionTime = xsGetTime();
-	// Don't claim native TPs until 15 minutes.
-	gLastClaimNativeMissionTime = xsGetTime() + 900000;
 }
 
 
@@ -2231,7 +2255,7 @@ minInterval 10
 	{
 		for (player = 1; < cNumberPlayers)
 		{
-			aiChat(player, "Better AI Mod. Version 4.3: Last updated on 6 August 2022.");
+			aiChat(player, "Better AI Mod. Baseline stable build 15.59076 (no Baltic Powers beta integration).");
 		}
 	}
 

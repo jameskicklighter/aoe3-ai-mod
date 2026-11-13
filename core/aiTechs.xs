@@ -9,6 +9,208 @@
 //==============================================================================
 // ageUpgradeMonitor
 //==============================================================================
+void traceAgeUpChoice(int preferredID = -1, int selectedID = -1,
+	int selectedTechID = -1, int optionCount = 0, bool fallback = false)
+{
+	static int lastAge = -1;
+	static int lastPreferredID = -2;
+	static int lastSelectedID = -2;
+
+	int age = kbGetAge();
+	if ((lastAge == age) && (lastPreferredID == preferredID) &&
+		(lastSelectedID == selectedID))
+	{
+		return;
+	}
+
+	int status = -1;
+	if (selectedTechID >= 0)
+		status = kbTechGetStatus(selectedTechID);
+	debugEvent("AGE-UP", "choice civ=" + cMyCiv + " from=" + age + " to=" +
+		(age + 1) + " preferred=" + preferredID + " selected=" + selectedID +
+		" tech=" + selectedTechID + " status=" + status + " options=" +
+		optionCount + " fallback=" + (fallback ? "1" : "0"));
+
+	lastAge = age;
+	lastPreferredID = preferredID;
+	lastSelectedID = selectedID;
+}
+
+void traceAgeUpPlanResult(int choiceID = -1, int planID = -1, bool asian = false)
+{
+	static int lastAge = -1;
+	static int lastChoiceID = -2;
+	static int lastPlanID = -2;
+
+	int age = kbGetAge();
+	if ((lastAge == age) && (lastChoiceID == choiceID) &&
+		(lastPlanID == planID))
+	{
+		return;
+	}
+
+	debugEvent("AGE-UP", "plan civ=" + cMyCiv + " from=" + age +
+		" choice=" + choiceID + " plan=" + planID + " mode=" +
+		(asian ? "wonder" : "research"));
+	lastAge = age;
+	lastChoiceID = choiceID;
+	lastPlanID = planID;
+}
+
+int getValidatedAgeUpTechChoice(int preferredID = -1)
+{
+	int age = kbGetAge();
+	int targetAge = age + 1;
+	int optionCount = 0;
+	int availableCount = 0;
+	int candidateID = -1;
+	int fallbackID = -1;
+	int index = -1;
+	bool preferredAvailable = false;
+
+	// The engine list changes after each transition and after choices remove
+	// later Federal, Tribal, or African options. Refresh it before validating
+	// Better AI's curated preference.
+	aiPopulatePoliticianList();
+	optionCount = aiGetPoliticianListCount(targetAge);
+	for (index = 0; < optionCount)
+	{
+		candidateID = aiGetPoliticianListByIndex(targetAge, index);
+		if ((candidateID < 0) ||
+			(kbTechGetStatus(candidateID) != cTechStatusObtainable))
+		{
+			continue;
+		}
+
+		availableCount++;
+		if (fallbackID < 0)
+			fallbackID = candidateID;
+		if (candidateID == preferredID)
+			preferredAvailable = true;
+	}
+
+	int selectedID = fallbackID;
+	if (preferredAvailable == true)
+		selectedID = preferredID;
+	bool usedFallback = (selectedID >= 0) && (selectedID != preferredID);
+	if (usedFallback == true)
+		arraySetInt(gAgeUpList, age, selectedID);
+
+	traceAgeUpChoice(preferredID, selectedID, selectedID,
+		availableCount, usedFallback);
+	return (selectedID);
+}
+
+int getAsianWonderCandidate(int candidateIndex = -1, int age = -1)
+{
+	if ((candidateIndex < 0) || (candidateIndex >= 5) ||
+		(age < cAge1) || (age >= cAge5))
+	{
+		return (-1);
+	}
+
+	string wonderName = "";
+	string ageSuffix = "2";
+	if (age == cAge2)
+		ageSuffix = "3";
+	else if (age == cAge3)
+		ageSuffix = "4";
+	else if (age == cAge4)
+		ageSuffix = "5";
+	switch (cMyCiv)
+	{
+		case cCivJapanese:
+		{
+			switch (candidateIndex)
+			{
+				case 0: { wonderName = "ypWJToshoguShrine"; break; }
+				case 1: { wonderName = "ypWJGiantBuddha"; break; }
+				case 2: { wonderName = "ypWJGoldenPavillion"; break; }
+				case 3: { wonderName = "ypWJToriiGates"; break; }
+				case 4: { wonderName = "ypWJShogunate"; break; }
+			}
+			break;
+		}
+		case cCivChinese:
+		{
+			switch (candidateIndex)
+			{
+				case 0: { wonderName = "ypWCSummerPalace"; break; }
+				case 1: { wonderName = "ypWCTempleOfHeaven"; break; }
+				case 2: { wonderName = "ypWCConfucianAcademy"; break; }
+				case 3: { wonderName = "ypWCPorcelainTower"; break; }
+				case 4: { wonderName = "ypWCWhitePagoda"; break; }
+			}
+			break;
+		}
+		case cCivIndians:
+		{
+			switch (candidateIndex)
+			{
+				case 0: { wonderName = "ypWIAgraFort"; break; }
+				case 1: { wonderName = "ypWIKarniMata"; break; }
+				case 2: { wonderName = "ypWITowerOfVictory"; break; }
+				case 3: { wonderName = "ypWITajMahal"; break; }
+				case 4: { wonderName = "ypWICharminarGate"; break; }
+			}
+			break;
+		}
+	}
+
+	return (kbGetProtoUnitID(wonderName + ageSuffix));
+}
+
+int getValidatedAsianWonderChoice(int preferredID = -1)
+{
+	int age = kbGetAge();
+	int candidateID = -1;
+	int candidateTechID = -1;
+	int fallbackID = -1;
+	int selectedID = -1;
+	int selectedTechID = -1;
+	int availableCount = 0;
+	int index = -1;
+	bool preferredAvailable = false;
+
+	for (index = 0; < 5)
+	{
+		candidateID = getAsianWonderCandidate(index, age);
+		if (candidateID < 0)
+			continue;
+		// Several legal age-up variants (for example Agra Fort and Torii
+		// Gates) are AbstractWonder but not AbstractPoliticalWonder.
+		if (kbProtoUnitIsType(cMyID, candidateID, cUnitTypeAbstractWonder) == false)
+			continue;
+
+		candidateTechID = kbProtoUnitGetAssociatedTech(candidateID);
+		if ((candidateTechID < 0) ||
+			(kbTechGetStatus(candidateTechID) != cTechStatusObtainable))
+		{
+			continue;
+		}
+
+		availableCount++;
+		if (fallbackID < 0)
+			fallbackID = candidateID;
+		if (candidateID == preferredID)
+			preferredAvailable = true;
+	}
+
+	selectedID = fallbackID;
+	if (preferredAvailable == true)
+		selectedID = preferredID;
+	if (selectedID >= 0)
+		selectedTechID = kbProtoUnitGetAssociatedTech(selectedID);
+
+	bool usedFallback = (selectedID >= 0) && (selectedID != preferredID);
+	if (usedFallback == true)
+		arraySetInt(gAgeUpList, age, selectedID);
+
+	traceAgeUpChoice(preferredID, selectedID, selectedTechID,
+		availableCount, usedFallback);
+	return (selectedID);
+}
+
 rule ageUpgradeMonitor
 inactive
 group tcComplete
@@ -106,19 +308,25 @@ minInterval 10
 
 	if (civIsAsian() == false)
 	{
-		politician = arrayGetInt(gAgeUpList, kbGetAge());
-		if ((kbTechGetStatus(politician) == cTechStatusObtainable) && (gAgeUpResearchPlan < 0))
+		politician = getValidatedAgeUpTechChoice(
+			arrayGetInt(gAgeUpList, kbGetAge()));
+		if ((politician >= 0) && (gAgeUpResearchPlan < 0))
 		{
 			// We search for buildings with AgeUpBuilding abstract type which includes the command post in historical maps.
 			gAgeUpResearchPlan = createResearchPlan(politician, cUnitTypeAgeUpBuilding, 99);
-			aiPlanSetDesiredResourcePriority(gAgeUpResearchPlan, 51);
-			aiPlanSetEventHandler(gAgeUpResearchPlan, cPlanEventStateChange, "ageUpEventHandler");
+			traceAgeUpPlanResult(politician, gAgeUpResearchPlan, false);
+			if (gAgeUpResearchPlan >= 0)
+			{
+				aiPlanSetDesiredResourcePriority(gAgeUpResearchPlan, 51);
+				aiPlanSetEventHandler(gAgeUpResearchPlan, cPlanEventStateChange, "ageUpEventHandler");
+			}
 			return;
 		}
 	}
 	else
 	{
-		politician = arrayGetInt(gAgeUpList, kbGetAge());	// Get the specified wonder
+		politician = getValidatedAsianWonderChoice(
+			arrayGetInt(gAgeUpList, kbGetAge()));	// Get the specified wonder
 		vector wonderLocation = gHomeBase + gDirection_DOWN * 20;
 		if ((politician == cUnitTypeypWIAgraFort2) || 
 			(politician == cUnitTypeypWIAgraFort3) || 
@@ -137,11 +345,15 @@ minInterval 10
 		{
 			wonderLocation = gHomeBase + gDirection_DOWN * 40;
 		}
-		if (gAgeUpResearchPlan < 0)
+		if ((politician >= 0) && (gAgeUpResearchPlan < 0))
 		{
 			gAgeUpResearchPlan = createBuildPlan(politician, 1, 100, wonderLocation, 4);
-			aiPlanSetDesiredResourcePriority(gAgeUpResearchPlan, 51);
-			aiPlanSetEventHandler(gAgeUpResearchPlan, cPlanEventStateChange, "ageUpEventHandler");
+			traceAgeUpPlanResult(politician, gAgeUpResearchPlan, true);
+			if (gAgeUpResearchPlan >= 0)
+			{
+				aiPlanSetDesiredResourcePriority(gAgeUpResearchPlan, 51);
+				aiPlanSetEventHandler(gAgeUpResearchPlan, cPlanEventStateChange, "ageUpEventHandler");
+			}
 			return;
 		}
 	}
@@ -160,6 +372,7 @@ minInterval 45
 	int ageReq = -1;
 	int planID = -1;
 	int planPriority = 50;
+	int configuredPriority = -1;
 
 	// Americans can get Market Techs for free via cTechDEHCHamiltonianEconomics, which MUST be in the
 	// deck for Americans to research Market Techs, so be careful if you change that.
@@ -177,10 +390,12 @@ minInterval 45
 
 	for (i = 0; < arrayGetSize(gMarketTechs))
 	{
+		planPriority = 50;
 		techID = arrayGetInt(gMarketTechs, i);
 		ageReq = arrayGetInt(gMarketTechsAgeReq, i);
-		if (arrayGetInt(gMarketTechsPrio, i) >= 0)
-			planPriority = arrayGetInt(gMarketTechsPrio, i);
+		configuredPriority = arrayGetInt(gMarketTechsPrio, i);
+		if (configuredPriority >= 0)
+			planPriority = configuredPriority;
 
 		if (kbTechGetStatus(techID) == cTechStatusObtainable &&
 			aiPlanGetIDByTypeAndVariableType(cPlanResearch, cResearchPlanTechID, techID) < 0)
@@ -189,6 +404,15 @@ minInterval 45
 			{
 				planID = createResearchPlan(techID, gMarketUnit, planPriority);
 				aiPlanSetDesiredResourcePriority(planID, planPriority);
+				if (gBetterAIDebug >= 1)
+				{
+					debugEvent("TECH-PLAN",
+						"src=market plan=" + planID +
+						" tech=" + techID +
+						" name=" + kbGetTechName(techID) +
+						" cfg=" + configuredPriority +
+						" pri=" + planPriority);
+				}
 			}
 		}
 	}
@@ -254,8 +478,8 @@ minInterval 45
 	int planID = -1;
 	int planPriority = 60;
 
-	// Mexicans can get Hacienda Techs for free via cTechDEHCFedMXElBajio, which MUST be in the
-	// deck for Mexicans to research Hacienda Techs, so be careful if you change that.
+	// Mexican Hacienda technologies are normally obtainable, but cTechDEHCFedMXElBajio makes
+	// all six free and nearly instant. Wait for that queued Federal card before researching them.
 	if (cMyCiv == cCivDEMexicans && kbTechGetStatus(cTechDEHCFedMXElBajio) != cTechStatusActive)
 		return;
 
@@ -318,6 +542,64 @@ minInterval 45
 	xsDisableSelf();
 }
 
+//==============================================================================
+// herdableUpgradeMonitor
+// Research the civilization's livestock improvement at the building that
+// actually hosts herdables. gLivestockPenUnit supplies that identity except
+// for Japan, where it intentionally points at Shrines for herd-plan routing.
+//==============================================================================
+rule herdableUpgradeMonitor
+inactive
+group postStartup
+minInterval 45
+{
+	int techID = cTechSelectiveBreeding;
+	int buildingTypeID = gLivestockPenUnit;
+	int ageReq = cAge3;
+	int planID = -1;
+	int planPriority = 50;
+
+	if (cMyCiv == cCivIndians)
+	{
+		techID = cTechypLivestockHoliness;
+		ageReq = cAge1;
+	}
+	else if (cMyCiv == cCivJapanese)
+	{
+		buildingTypeID = cUnitTypeYPLivestockPenAsian;
+	}
+	else if ((cMyCiv == cCivDEMexicans) &&
+		(kbTechGetStatus(cTechDEHCFedMXElBajio) != cTechStatusActive))
+	{
+		return;
+	}
+
+	if (kbTechGetStatus(techID) == cTechStatusActive)
+	{
+		xsDisableSelf();
+		return;
+	}
+	if ((buildingTypeID < 0) ||
+		(kbTechGetStatus(techID) != cTechStatusObtainable) ||
+		(kbGetAge() < ageReq) ||
+		(kbUnitCount(cMyID, buildingTypeID, cUnitStateABQ) < 1) ||
+		(aiPlanGetIDByTypeAndVariableType(cPlanResearch, cResearchPlanTechID, techID) >= 0))
+	{
+		return;
+	}
+
+	planID = createResearchPlan(techID, buildingTypeID, planPriority);
+	if (planID >= 0)
+	{
+		aiPlanSetDesiredResourcePriority(planID, planPriority);
+		debugEvent("TECH-PLAN",
+			"src=herdable plan=" + planID +
+			" tech=" + techID +
+			" name=" + kbGetTechName(techID) +
+			" building=" + buildingTypeID);
+	}
+}
+
 rule mosqueUpgradeMonitor
 inactive
 minInterval 30
@@ -360,6 +642,7 @@ minInterval 30
 	int ageReq = -1;
 	int planID = -1;
 	int planPriority = 50;
+	int configuredPriority = -1;
 	static int buildingTypeID = -1;
 	if (buildingTypeID < 0)
 	{
@@ -371,10 +654,12 @@ minInterval 30
 
 	for (i = 0; < arrayGetSize(gAllegianceTechs))
 	{
+		planPriority = 50;
 		techID = arrayGetInt(gAllegianceTechs, i);
 		ageReq = arrayGetInt(gAllegianceTechsAgeReq, i);
-		if (arrayGetInt(gAllegianceTechsPrio, i) > 0) // We want a specifically set priority determined in aiInit.xs.
-			planPriority = arrayGetInt(gAllegianceTechsPrio, i);
+		configuredPriority = arrayGetInt(gAllegianceTechsPrio, i);
+		if (configuredPriority > 0) // We want a specifically set priority determined in aiSetup.xs.
+			planPriority = configuredPriority;
 		if (kbTechGetStatus(techID) == cTechStatusObtainable &&
 			aiPlanGetIDByTypeAndVariableType(cPlanResearch, cResearchPlanTechID, techID) < 0)
 		{
@@ -382,6 +667,15 @@ minInterval 30
 			{
 				planID = createResearchPlan(techID, buildingTypeID, planPriority);
 				aiPlanSetDesiredResourcePriority(planID, planPriority);
+				if (gBetterAIDebug >= 1)
+				{
+					debugEvent("TECH-PLAN",
+						"src=allegiance plan=" + planID +
+						" tech=" + techID +
+						" name=" + kbGetTechName(techID) +
+						" cfg=" + configuredPriority +
+						" pri=" + planPriority);
+				}
 			}
 		}
 	}

@@ -11,6 +11,19 @@
 // Debug output functions.
 //==============================================================================
 
+string getDebugPrefix(string category = "")
+{
+	return("[BAI][15.59076-dev][P" + cMyID + "][" + category + "][" + xsGetTime() + "] ");
+}
+
+void debugEvent(string category = "", string message = "")
+{
+	if (gBetterAIDebug >= 1)
+	{
+		aiEcho(getDebugPrefix(category) + message);
+	}
+}
+
 void echoMessage (string message = "")
 {
 	//return; // When I release updates.
@@ -23,81 +36,81 @@ void echoMessage (string message = "")
 
 void debugUtilities (string message = "")
 {
-	if (cDebugUtilities == true)
+	if ((cDebugUtilities == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("UTILITIES") + message);
 	}
 }
 
 void debugBuildings (string message = "")
 {
-	if (cDebugBuildings == true)
+	if ((cDebugBuildings == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("BUILDINGS") + message);
 	}
 }
 
 void debugTechs (string message = "")
 {
-	if (cDebugTechs == true)
+	if ((cDebugTechs == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("TECHS") + message);
 	}
 }
 
 void debugExploration (string message = "")
 {
-	if (cDebugExploration == true)
+	if ((cDebugExploration == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("EXPLORATION") + message);
 	}
 }
 
 void debugEconomy (string message = "")
 {
-	if (cDebugEconomy == true)
+	if ((cDebugEconomy == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("ECONOMY") + message);
 	}
 }
 
 void debugMilitary (string message = "")
 {
-	if (cDebugMilitary == true)
+	if ((cDebugMilitary == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("MILITARY") + message);
 	}
 }
 
 void debugHCCards (string message = "")
 {
-	if (cDebugHCCards == true)
+	if ((cDebugHCCards == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("HC-CARDS") + message);
 	}
 }
 
 void debugChats (string message = "")
 {
-	if (cDebugChats == true)
+	if ((cDebugChats == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("CHATS") + message);
 	}
 }
 
 void debugSetup (string message = "")
 {
-	if (cDebugSetup == true)
+	if ((cDebugSetup == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("SETUP") + message);
 	}
 }
 
 void debugCore (string message = "")
 {
-	if (cDebugCore == true)
+	if ((cDebugCore == true) || (gBetterAIDebug >= 2))
 	{
-		aiEcho(message);
+		aiEcho(getDebugPrefix("CORE") + message);
 	}
 }
 
@@ -273,16 +286,69 @@ void arrayRemoveDonePlans(int arrayID = -1)
 	if (arrayID > gArrayPlanIDs)
 		return;
 
-	for (planIndex = 0; < arrayGetSize(arrayID))
-	{	// If we delete values while inside the loop, the size of the array shrinks
-		// and we may face errors.
-		if (aiPlanGetState(arrayGetInt(arrayID, planIndex)) < 0)
-			arraySetInt(arrayID, planIndex, -1);
-	}
-	for (planIndex = 0; < arrayGetSize(arrayID))
+	int sizeBefore = arrayGetSize(arrayID);
+	int planIndex = sizeBefore - 1;
+	int planID = -1;
+	int removed = 0;
+	int logicalSize = 0;
+	int retainedCount = 0;
+	bool removePlan = false;
+	bool invalidRetainedPlan = false;
+
+	while (planIndex >= 0)
 	{
-		if (arrayGetInt(arrayID, planIndex) < 0)
+		planID = arrayGetInt(arrayID, planIndex);
+		removePlan = false;
+		if (planID < 0)
+			removePlan = true;
+		else if (aiPlanGetState(planID) < 0)
+			removePlan = true;
+
+		if (removePlan == true)
+		{
 			arrayDeleteInt(arrayID, planIndex);
+			removed++;
+		}
+		planIndex = planIndex - 1;
+	}
+
+	if (removed > 0)
+	{
+		if (gBetterAIDebug >= 1)
+		{
+			debugEvent("ARRAY-CLEANUP",
+				"array=" + arrayID +
+				" before=" + sizeBefore +
+				" removed=" + removed +
+				" after=" + arrayGetSize(arrayID));
+		}
+	}
+
+	if (gBetterAIDebug >= 1)
+	{
+		logicalSize = arrayGetSize(arrayID);
+		planIndex = 0;
+		while (planIndex < logicalSize)
+		{
+			planID = arrayGetInt(arrayID, planIndex);
+			if (planID < 0)
+				invalidRetainedPlan = true;
+			else if (aiPlanGetState(planID) < 0)
+				invalidRetainedPlan = true;
+			else
+				retainedCount++;
+			planIndex = planIndex + 1;
+		}
+
+		if ((invalidRetainedPlan == true) ||
+			(retainedCount != logicalSize))
+		{
+			debugEvent("ARRAY-INVARIANT",
+				"array=" + arrayID +
+				" size=" + logicalSize +
+				" valid=" + retainedCount +
+				" capacity=" + arrayGetNumElements(arrayID));
+		}
 	}
 }
 
@@ -1431,7 +1497,7 @@ int createSimpleResearchPlan(int techID = -1, int buildingConstantID = -1, int e
 {
 	int planID = aiPlanCreate("Simple Research Plan, " + kbGetTechName(techID), cPlanResearch);
 	if (planID < 0)
-		debugUtilities("Failed to create Simple Research Plan for " + kbGetTechName(techID));
+		debugTechs("Failed to create Simple Research Plan for " + kbGetTechName(techID));
 	else
 	{
 		aiPlanSetVariableInt(planID, cResearchPlanTechID, 0, techID);
@@ -1439,7 +1505,7 @@ int createSimpleResearchPlan(int techID = -1, int buildingConstantID = -1, int e
 		aiPlanSetDesiredPriority(planID, pri);
 		aiPlanSetDesiredResourcePriority(planID, resourcePri);
 		aiPlanSetActive(planID);
-		debugUtilities("Created a Simple Research Plan for: " + kbGetTechName(techID) + " with plan number: " + planID);
+		debugTechs("Created a Simple Research Plan for: " + kbGetTechName(techID) + " with plan number: " + planID);
 	}
 
 	return (planID);
@@ -1477,7 +1543,7 @@ int createSimpleResearchPlanSpecificBuilding(int techID = -1, int buildingID = -
 {
 	int planID = aiPlanCreate("Simple Research Plan Specific Building, " + kbGetTechName(techID), cPlanResearch);
 	if (planID < 0)
-		debugUtilities("Failed to create Simple Research Plan Specific Building for " + kbGetTechName(techID));
+		debugTechs("Failed to create Simple Research Plan Specific Building for " + kbGetTechName(techID));
 	else
 	{
 		aiPlanSetVariableInt(planID, cResearchPlanTechID, 0, techID);
@@ -1485,7 +1551,7 @@ int createSimpleResearchPlanSpecificBuilding(int techID = -1, int buildingID = -
 		aiPlanSetDesiredPriority(planID, pri);
 		aiPlanSetDesiredResourcePriority(planID, resourcePri);
 		aiPlanSetActive(planID);
-		debugUtilities("Created a Simple Research Plan Specific Building for: " + kbGetTechName(techID) + " with plan number: " + planID);
+		debugTechs("Created a Simple Research Plan Specific Building for: " + kbGetTechName(techID) + " with plan number: " + planID);
 	}
 
 	return (planID);
@@ -1497,13 +1563,18 @@ int createSimpleResearchPlanSpecificBuilding(int techID = -1, int buildingID = -
 int createResearchPlan(int techID = -1, int buildingType = -1, int pri = 50, int buildingID = -1)
 {
 	int planID = aiPlanCreate("Research " + kbGetTechName(techID), cPlanResearch);
+	if (planID < 0)
+	{
+		debugTechs("Failed to create Research Plan for " + kbGetTechName(techID));
+		return (planID);
+	}
 	aiPlanSetVariableInt(planID, cResearchPlanTechID, 0, techID);
 	aiPlanSetVariableInt(planID, cResearchPlanBuildingTypeID, 0, buildingType);
 	aiPlanSetDesiredPriority(planID, pri);
 	aiPlanSetVariableInt(planID, cResearchPlanBuildingID, 0, buildingID); //important for trading posts
 	aiPlanSetEscrowID(planID, cRootEscrowID);
 	aiPlanSetActive(planID, true);
-	debugUtilities("Created a Research Plan for: " + kbGetTechName(techID) + " with plan number: " + planID);
+	debugTechs("Created a Research Plan for: " + kbGetTechName(techID) + " with plan number: " + planID);
 
 	return(planID);
 }
@@ -1796,6 +1867,11 @@ int createBuildPlan(int puid = -1, int numPlans = 1, int pri = 100, vector posit
 
 		debugBuildings("Making build plan for " + kbGetUnitTypeName(puid));
 		selectBuildPlanPosition(planID, puid, position);
+		if ((puid == gDockUnit) || (puid == cUnitTypedeTorp) ||
+			(puid == cUnitTypedeTorpGeneric))
+		{
+			traceBuildPlanCreated(planID, puid);
+		}
 		aiPlanSetActive(planID, setActive);
 	}
 	
@@ -1825,9 +1901,6 @@ int buildTradingPost(int socketID = -1, int desResPriority = 50, int builderType
 	aiPlanAddUnitType(planID, builderType, numBuilders, numBuilders, numBuilders);
 	aiPlanSetDesiredPriority(planID, 99);
 	aiPlanSetDesiredResourcePriority(planID, desResPriority);
-	aiPlanSetEconomy(planID, true);
-	aiPlanSetMilitary(planID, false);
-	aiPlanSetEscrowID(planID, cRootEscrowID);
 	aiPlanSetActive(planID);
 
 	return(planID);
@@ -2148,8 +2221,8 @@ bool isDefendingOrAttacking()
 				(existingPlanID != gLandReservePlan) &&
 				(existingPlanID != gBaseDefendPlan) &&
 				(existingPlanID != gNavyRepairPlan) && 
-				(existingPlanID != gNavyDefendPlan)/*  && 
-				(existingPlanID != gHealerPlan) */)
+				(existingPlanID != gNavyDefendPlan) &&
+				(existingPlanID != gHealerPlan))
 			{
 				debugUtilities("isDefendingOrAttacking: don't create another combat plan because we already have one named: "
 				+ aiPlanGetName(existingPlanID));

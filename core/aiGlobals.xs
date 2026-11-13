@@ -41,6 +41,12 @@ extern vector avgEnemyBaseLocation = cInvalidVector;
 // Buildings.
 //==============================================================================
 extern const int cBuildPlanBuilderTypeID = 0;
+extern const int cBuildPlanTorpTargetMineID = 1;
+extern const int cNativeSocketOwnershipNeutral = 0;
+extern const int cNativeSocketOwnershipSelf = 1;
+extern const int cNativeSocketOwnershipAlly = 2;
+extern const int cNativeSocketOwnershipEnemy = 3;
+extern const int cNativeSocketOwnershipHardOccupied = 4;
 
 extern int gTCBuildPlanID = -1;
 extern vector gTCSearchVector = cInvalidVector; // Used to define the center of the TC building placement search.
@@ -59,8 +65,9 @@ extern bool gBuildWalls = false;         // Global indicating if we're walling u
 extern int gNumTowers = 0;               // How many towers do we want to build?
 extern bool gTowerCommandActive = false; // This is set by commHandler and used to determine which Tower amount to build.
 extern int gCommandNumTowers = 0;        // Set inside of commHandler and used when we build Towers based on a command.
-extern vector gTorpPosition = cInvalidVector;
 extern int gTorpPositionsToAvoid = -1;
+extern int gTorpBuildPlanTargetMineID = -1;
+extern int gBuildTraceTorpWagonUntilTime = -1;
 extern int gMilitaryBuildings = -1;
 extern int gArmyUnitBuildings = -1;
 extern int gFullGranaries = -1;  // List of granaries surrounded by fields
@@ -245,6 +252,36 @@ extern int gLandReservePlan = -1; // Reserve defend plan, gathers units for use 
 extern int gBaseDefendPlan = -1;
 extern int gHealerPlan = -1;      // Defend plan that controls our healers in our base.
 
+extern const int cLandMissionSourceAutoAttack = 0;
+extern const int cLandMissionSourceAutoDefend = 1;
+extern const int cLandMissionSourceRequestedAttack = 2;
+extern const int cLandMissionSourceRequestedDefend = 3;
+extern const int cLandMissionUnitSampleCapacity = 8;
+extern const int cLandMissionParentUnitSampleLimit = 6;
+extern int gTracedLandMissionPlanID = -1;
+extern int gTracedLandMissionSource = -1;
+extern int gTracedLandMissionNextSnapshotTime = -1;
+extern int gTracedLandMissionUnit0 = -1;
+extern int gTracedLandMissionUnit1 = -1;
+extern int gTracedLandMissionUnitIDs = -1;
+extern int gTracedLandMissionUnitOriginPlanIDs = -1;
+extern int gTracedLandMissionUnitCount = 0;
+extern bool gTracedLandMissionUnitCacheCapped = false;
+extern vector gTracedLandMissionTargetPoint = cInvalidVector;
+extern vector gTracedLandMissionGatherPoint = cInvalidVector;
+extern int gPostLandMissionPlanID = -1;
+extern int gPostLandMissionSource = -1;
+extern int gPostLandMissionUnit0 = -1;
+extern int gPostLandMissionUnit1 = -1;
+extern int gPostLandMissionUnitIDs = -1;
+extern int gPostLandMissionUnitOriginPlanIDs = -1;
+extern int gPostLandMissionUnitCount = 0;
+extern bool gPostLandMissionUnitCacheCapped = false;
+extern vector gPostLandMissionTargetPoint = cInvalidVector;
+extern vector gPostLandMissionGatherPoint = cInvalidVector;
+extern int gPostLandMissionUntilTime = -1;
+extern int gPostLandMissionNextSampleTime = -1;
+
 extern bool gDefenseReflex = false; // Set true when a defense reflex is overriding normal ops.
 extern bool gDefenseReflexPaused = false; // Set true when we're in a defense reflex, but overwhelmed, so we're hiding to rebuild an army.
 extern int gDefenseReflexBaseID = -1; // Set to the base ID that we're defending in this emergency
@@ -283,7 +320,7 @@ extern int gAttackMissionInterval =
 			// launches.  Attacks will usually happen before this period is over.
 extern int gDefendMissionInterval = 300000; // 5 minutes.   Makes the AI less likely to do another defend right after doing one.
 extern int gClaimTradeMissionInterval = 300000;  // 5 minutes.
-extern int gClaimNativeMissionInterval = 600000; // 10 minutes.
+extern int gClaimNativeMissionInterval = 300000; // 5 minutes.
 extern int gLastClaimNativeMissionTime = -1;
 
 extern int gNumEnemies = -1;             // Used to pick a target to attack.
@@ -426,12 +463,16 @@ extern bool gLowDifficulty = false;
 //==============================================================================
 // Debug variables.
 //==============================================================================
-extern const bool cDebugUtilities = true;
-extern const bool cDebugBuildings = true;
+// 0: Curated events off; explicitly enabled subsystem flags still emit.
+// 1: Curated events plus explicitly enabled subsystem flags.
+// 2: Curated events and all subsystem output.
+extern int gBetterAIDebug = 1;
+extern const bool cDebugUtilities = false;
+extern const bool cDebugBuildings = false;
 extern const bool cDebugTechs = true;
 extern const bool cDebugExploration = false;
-extern const bool cDebugEconomy = true;
-extern const bool cDebugMilitary = true;
+extern const bool cDebugEconomy = false;
+extern const bool cDebugMilitary = false;
 extern const bool cDebugHCCards = false;
 extern const bool cDebugChats = false;
 extern const bool cDebugSetup = false;
